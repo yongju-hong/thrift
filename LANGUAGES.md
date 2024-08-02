@@ -80,7 +80,7 @@ Thrift's core protocol is TBinary, supported by all languages except for JavaScr
 <!-- Since -----------------><td>0.2.0</td>
 <!-- Build Systems ---------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Language Levels -------><td colspan=2>C++11</td>
-<!-- Field types -----------><td><img src="/doc/images/cred.png" alt=""/></td>
+<!-- Field types -----------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Low-Level Transports --><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Transport Wrappers ----><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Protocols -------------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
@@ -128,7 +128,7 @@ Thrift's core protocol is TBinary, supported by all languages except for JavaScr
 <!-- Since -----------------><td>0.8.0</td>
 <!-- Build Systems ---------><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cred.png" alt=""/></td>
 <!-- Language Levels -------><td>2010</td><td>Alexandria 11.2</td>
-<!-- Field types -----------><td><img src="/doc/images/cgrn.png" alt="Yes"/><td>
+<!-- Field types -----------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Low-Level Transports --><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td>
 <!-- Transport Wrappers ----><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td>
 <!-- Protocols -------------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
@@ -140,7 +140,7 @@ Thrift's core protocol is TBinary, supported by all languages except for JavaScr
 <!-- Since -----------------><td>0.13.0</td>
 <!-- Build Systems ---------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td>
 <!-- Language Levels -------><td colspan=2>.NET Standard 2.x, .NET 6</td>
-<!-- Field types -----------><td><img src="/doc/images/cgrn.png" alt="Yes"/><td>
+<!-- Field types -----------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Low-Level Transports --><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Transport Wrappers ----><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td>
 <!-- Protocols -------------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
@@ -163,8 +163,8 @@ Thrift's core protocol is TBinary, supported by all languages except for JavaScr
 <td align=left><a href="https://github.com/apache/thrift/blob/master/lib/go/README.md">Go</a></td>
 <!-- Since -----------------><td>0.7.0</td>
 <!-- Build Systems ---------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td>
-<!-- Language Levels -------><td>1.18.7</td><td>1.19.2</td>
-<!-- Field types -----------><td><img src="/doc/images/cred.png" alt=""/></td>
+<!-- Language Levels -------><td>1.21</td><td>1.22</td>
+<!-- Field types -----------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Low-Level Transports --><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Transport Wrappers ----><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Protocols -------------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
@@ -176,7 +176,7 @@ Thrift's core protocol is TBinary, supported by all languages except for JavaScr
 <!-- Since -----------------><td>0.9.3</td>
 <!-- Build Systems ---------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td>
 <!-- Language Levels -------><td>4.1.5</td><td>4.2.5</td>
-<!-- Field types -----------><td><img src="/doc/images/cred.png" alt=""/></td>
+<!-- Field types -----------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Low-Level Transports --><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td>
 <!-- Transport Wrappers ----><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td>
 <!-- Protocols -------------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
@@ -319,7 +319,7 @@ Thrift's core protocol is TBinary, supported by all languages except for JavaScr
 <td align=left><a href="https://github.com/apache/thrift/blob/master/lib/rs/README.md">Rust</a></td>
 <!-- Since -----------------><td>0.11.0</td>
 <!-- Build Systems ---------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td>
-<!-- Language Levels -------><td>1.61.0</td><td>1.xx.x</td>
+<!-- Language Levels -------><td>1.65.0</td><td>1.xx.x</td>
 <!-- Field types -----------><td><img src="/doc/images/cred.png" alt=""/></td>
 <!-- Low-Level Transports --><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td>
 <!-- Transport Wrappers ----><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cred.png" alt=""/></td>
@@ -343,8 +343,8 @@ Thrift's core protocol is TBinary, supported by all languages except for JavaScr
 <td align=left><a href="https://github.com/apache/thrift/blob/master/lib/swift/README.md">Swift</a></td>
 <!-- Since -----------------><td>0.12.0</td>
 <!-- Build Systems ---------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td>
-<!-- Language Levels -------><td colspan=2>4.2.1</td>
-<!-- Field types -----------><td><img src="/doc/images/cred.png" alt=""/></td>
+<!-- Language Levels -------><td colspan=2>5.7</td>
+<!-- Field types -----------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Low-Level Transports --><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>
 <!-- Transport Wrappers ----><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td>
 <!-- Protocols -------------><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td><td><img src="/doc/images/cred.png" alt=""/></td><td><img src="/doc/images/cgrn.png" alt="Yes"/></td>

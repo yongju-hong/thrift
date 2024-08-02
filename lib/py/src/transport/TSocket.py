@@ -151,6 +151,8 @@ class TSocket(TSocketBase):
     def read(self, sz):
         try:
             buff = self.handle.recv(sz)
+        except socket.timeout as e:
+            raise TTransportException(type=TTransportException.TIMED_OUT, message="read timeout", inner=e)
         except socket.error as e:
             if (e.args[0] == errno.ECONNRESET and
                     (sys.platform == 'darwin' or sys.platform.startswith('freebsd'))):
@@ -161,8 +163,6 @@ class TSocket(TSocketBase):
                 self.close()
                 # Trigger the check to raise the END_OF_FILE exception below.
                 buff = ''
-            elif e.args[0] == errno.ETIMEDOUT:
-                raise TTransportException(type=TTransportException.TIMED_OUT, message="read timeout", inner=e)
             else:
                 raise TTransportException(message="unexpected exception", inner=e)
         if len(buff) == 0:
@@ -208,7 +208,7 @@ class TServerSocket(TSocketBase, TServerTransportBase):
         else:
             # We cann't update backlog when it is already listening, since the
             # handle has been created.
-            logger.warn('You have to set backlog before listen.')
+            logger.warning('You have to set backlog before listen.')
 
     def listen(self):
         res0 = self._resolveAddr()
@@ -228,12 +228,14 @@ class TServerSocket(TSocketBase, TServerTransportBase):
                 if eno == errno.ECONNREFUSED:
                     os.unlink(res[4])
 
-        self.handle = socket.socket(res[0], res[1])
-        self.handle.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if hasattr(self.handle, 'settimeout'):
-            self.handle.settimeout(None)
-        self.handle.bind(res[4])
-        self.handle.listen(self._backlog)
+        self.handle = s = socket.socket(res[0], res[1])
+        if s.family is socket.AF_INET6:
+            s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(s, 'settimeout'):
+            s.settimeout(None)
+        s.bind(res[4])
+        s.listen(self._backlog)
 
     def accept(self):
         client, addr = self.handle.accept()
