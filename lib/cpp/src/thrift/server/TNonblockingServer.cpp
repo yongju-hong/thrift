@@ -296,7 +296,7 @@ public:
     if (!notifyIOThread()) {
       server_->decrementActiveProcessors();
       close();
-      GlobalOutput.printf("[ERROR] TConnection::forceClose: failed write on notify pipe, closing.")
+      GlobalOutput.printf("[ERROR] TConnection::forceClose: failed write on notify pipe, closing.");
       throw TException("TConnection::forceClose: failed write on notify pipe");
     }
   }
