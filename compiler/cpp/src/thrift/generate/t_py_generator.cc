@@ -1251,11 +1251,11 @@ void t_py_generator::generate_service(t_service* tservice) {
       f_service_ << "from " << get_real_py_module_rel(tservice->get_extends()->get_program(), gen_twisted_, package_prefix_)
                  << " import " << tservice->get_extends()->get_name()
                  << " as " << get_real_py_module_as(tservice->get_extends()->get_program(), gen_twisted_, package_prefix_) << "_"
-                 << tservice->get_extends()->get_name() << endl;
+                 << tservice->get_extends()->get_name() << '\n';
     } else {
       f_service_ << "import " 
                  << get_real_py_module(tservice->get_extends()->get_program(), gen_twisted_, package_prefix_) << "."
-                 << tservice->get_extends()->get_name() << endl;
+                 << tservice->get_extends()->get_name() << '\n';
     }
   }
 
