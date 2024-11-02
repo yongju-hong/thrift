@@ -64,6 +64,7 @@ public:
     gen_twisted_ = false;
     gen_dynamic_ = false;
     gen_enum_ = false;
+    gen_type_hints_ = false;
     coding_ = "";
     gen_dynbaseclass_ = "";
     gen_dynbaseclass_exc_ = "";
@@ -128,6 +129,11 @@ public:
         gen_tornado_ = true;
       } else if( iter->first.compare("coding") == 0) {
         coding_ = iter->second;
+      } else if (iter->first.compare("type_hints") == 0) {
+        if (!gen_enum_) {
+          throw "the type_hints py option requires the enum py option";
+        }
+        gen_type_hints_ = true;
       } else {
         throw "unknown option py:" + iter->first;
       }
@@ -255,12 +261,16 @@ public:
   std::string declare_argument(t_field* tfield);
   std::string render_field_default_value(t_field* tfield);
   std::string type_name(t_type* ttype);
-  std::string function_signature(t_function* tfunction, bool interface = false);
+  std::string function_signature(t_function* tfunction, bool interface = false, bool send_part = false);
   std::string argument_list(t_struct* tstruct,
                             std::vector<std::string>* pre = nullptr,
                             std::vector<std::string>* post = nullptr);
   std::string type_to_enum(t_type* ttype);
   std::string type_to_spec_args(t_type* ttype);
+  std::string type_to_py_type(t_type* type);
+  std::string member_hint(t_type* type, t_field::e_req req);
+  std::string arg_hint(t_type* type);
+  std::string func_hint(t_type* type);
 
   static bool is_valid_namespace(const std::string& sub_namespace) {
     return sub_namespace == "twisted";
@@ -326,6 +336,11 @@ private:
   std::string import_dynbase_;
 
   bool gen_slots_;
+
+  /**
+  * True if we should generate classes type hints and type checks in write methods.
+  */
+  bool gen_type_hints_;
 
   std::string copy_options_;
 
@@ -480,12 +495,18 @@ string t_py_generator::py_autogen_comment() {
  */
 string t_py_generator::py_imports() {
   ostringstream ss;
+  if (gen_type_hints_) {
+    ss << "from __future__ import annotations" << '\n' << "import typing" << '\n';
+  }
+
   ss << "from thrift.Thrift import TType, TMessageType, TFrozenDict, TException, "
         "TApplicationException"
      << '\n'
      << "from thrift.protocol.TProtocol import TProtocolException"
      << '\n'
      << "from thrift.TRecursive import fix_spec"
+     << '\n'
+     << "from uuid import UUID"
      << '\n';
   if (gen_enum_) {
     ss << "from enum import IntEnum" << '\n';
@@ -616,6 +637,9 @@ string t_py_generator::render_const_value(t_type* type, t_const_value* value) {
       } else {
         out << emit_double_as_string(value->get_double());
       }
+      break;
+    case t_base_type::TYPE_UUID:
+      out << "UUID(\"" << get_escaped_string(value) << "\")";
       break;
     default:
       throw "compiler error: no const of base type " + t_base_type::t_base_name(tbase);
@@ -827,6 +851,8 @@ void t_py_generator::generate_py_struct_definition(ostream& out,
   out << ":" << '\n';
   indent_up();
   generate_python_docstring(out, tstruct);
+  std::string thrift_spec_type = gen_type_hints_ ? ": typing.Any" : "";
+  out << indent() << "thrift_spec" << thrift_spec_type << " = None" << '\n';
 
   out << '\n';
 
@@ -902,7 +928,9 @@ void t_py_generator::generate_py_struct_definition(ostream& out,
                       << "'] = " << (*m_iter)->get_name() << '\n';
         }
       } else {
-        indent(out) << "self." << (*m_iter)->get_name() << " = " << (*m_iter)->get_name() << '\n';
+        indent(out) << "self." << (*m_iter)->get_name()
+                    << member_hint((*m_iter)->get_type(), (*m_iter)->get_req()) << " = "
+                    << (*m_iter)->get_name() << '\n';
       }
     }
 
@@ -1173,7 +1201,7 @@ void t_py_generator::generate_py_struct_writer(ostream& out, t_struct* tstruct) 
 
   indent(out) << "def write(self, oprot):" << '\n';
   indent_up();
-
+  indent(out) << "self.validate()" << '\n';
   indent(out) << "if oprot._fast_encode is not None and self.thrift_spec is not None:" << '\n';
   indent_up();
 
@@ -1587,7 +1615,7 @@ void t_py_generator::generate_service_client(t_service* tservice) {
     }
 
     f_service_ << '\n';
-    indent(f_service_) << "def send_" << function_signature(*f_iter, false) << ":" << '\n';
+    indent(f_service_) << "def send_" << function_signature(*f_iter, false, true) << ":" << '\n';
     indent_up();
 
     std::string argsname = (*f_iter)->get_name() + "_args";
@@ -2364,6 +2392,9 @@ void t_py_generator::generate_deserialize_field(ostream& out,
       case t_base_type::TYPE_DOUBLE:
         out << "readDouble()";
         break;
+      case t_base_type::TYPE_UUID:
+        out << "readUuid()";
+        break;
       default:
         throw "compiler error: no Python name for base type " + t_base_type::t_base_name(tbase);
       }
@@ -2556,6 +2587,9 @@ void t_py_generator::generate_serialize_field(ostream& out, t_field* tfield, str
       case t_base_type::TYPE_DOUBLE:
         out << "writeDouble(" << name << ")";
         break;
+      case t_base_type::TYPE_UUID:
+        out << "writeUuid(" << name << ")";
+        break;
       default:
         throw "compiler error: no Python name for base type " + t_base_type::t_base_name(tbase);
       }
@@ -2729,7 +2763,10 @@ void t_py_generator::generate_python_docstring(ostream& out, t_doc* tdoc) {
  */
 string t_py_generator::declare_argument(t_field* tfield) {
   std::ostringstream result;
-  result << tfield->get_name() << "=";
+  t_field::e_req req = tfield->get_req();
+  result << tfield->get_name() << member_hint(tfield->get_type(), req);
+
+  result << " = ";
   if (tfield->get_value() != nullptr) {
     result << render_field_default_value(tfield);
   } else {
@@ -2758,7 +2795,7 @@ string t_py_generator::render_field_default_value(t_field* tfield) {
  * @param tfunction Function definition
  * @return String of rendered function definition
  */
-string t_py_generator::function_signature(t_function* tfunction, bool interface) {
+string t_py_generator::function_signature(t_function* tfunction, bool interface, bool send_part) {
   vector<string> pre;
   vector<string> post;
   string signature = tfunction->get_name() + "(";
@@ -2768,6 +2805,10 @@ string t_py_generator::function_signature(t_function* tfunction, bool interface)
   }
 
   signature += argument_list(tfunction->get_arglist(), &pre, &post) + ")";
+  if (!send_part) {
+    signature += func_hint(tfunction->get_returntype());
+  }
+
   return signature;
 }
 
@@ -2798,6 +2839,7 @@ string t_py_generator::argument_list(t_struct* tstruct, vector<string>* pre, vec
       result += ", ";
     }
     result += (*f_iter)->get_name();
+    result += arg_hint((*f_iter)->get_type());
   }
   if (post) {
     for (s_iter = post->begin(); s_iter != post->end(); ++s_iter) {
@@ -2835,8 +2877,78 @@ string t_py_generator::type_name(t_type* ttype) {
   return ttype->get_name();
 }
 
+string t_py_generator::arg_hint(t_type* type) {
+  if (gen_type_hints_) {
+    return ": " + type_to_py_type(type);
+  }
+
+  return "";
+}
+
+string t_py_generator::member_hint(t_type* type, t_field::e_req req) {
+  if (gen_type_hints_) {
+    if (req != t_field::T_REQUIRED) {
+      return ": typing.Optional[" + type_to_py_type(type) + "]";
+    } else {
+      return ": " + type_to_py_type(type);
+    }
+  }
+
+  return "";
+}
+
+string t_py_generator::func_hint(t_type* type) {
+  if (gen_type_hints_) {
+    return " -> " + type_to_py_type(type);
+  }
+
+  return "";
+}
+
 /**
- * Converts the parse type to a Python tyoe
+ * Converts the parse type to a Python type
+ */
+string t_py_generator::type_to_py_type(t_type* type) {
+  type = get_true_type(type);
+
+  if (type->is_binary()) {
+    return "bytes";
+  }
+  if (type->is_base_type()) {
+    t_base_type::t_base tbase = ((t_base_type*)type)->get_base();
+    switch (tbase) {
+    case t_base_type::TYPE_VOID:
+      return "None";
+    case t_base_type::TYPE_STRING:
+      return "str";
+    case t_base_type::TYPE_BOOL:
+      return "bool";
+    case t_base_type::TYPE_I8:
+    case t_base_type::TYPE_I16:
+    case t_base_type::TYPE_I32:
+    case t_base_type::TYPE_I64:
+      return "int";
+    case t_base_type::TYPE_DOUBLE:
+      return "float";
+    case t_base_type::TYPE_UUID:
+      return "UUID";
+    }
+  } else if (type->is_enum() || type->is_struct() || type->is_xception()) {
+    return type_name(type);
+  } else if (type->is_map()) {
+    return "dict[" + type_to_py_type(((t_map*)type)->get_key_type()) + ", "
+           + type_to_py_type(((t_map*)type)->get_val_type()) + "]";
+  } else if (type->is_set()) {
+    return "set[" + type_to_py_type(((t_set*)type)->get_elem_type()) + "]";
+  } else if (type->is_list()) {
+    return "list[" + type_to_py_type(((t_list*)type)->get_elem_type()) + "]";
+  }
+
+  throw "INVALID TYPE IN type_to_py_type: " + type->get_name();
+}
+
+/**
+ * Converts the parse type to a Python type enum
  */
 string t_py_generator::type_to_enum(t_type* type) {
   type = get_true_type(type);
@@ -2860,6 +2972,8 @@ string t_py_generator::type_to_enum(t_type* type) {
       return "TType.I64";
     case t_base_type::TYPE_DOUBLE:
       return "TType.DOUBLE";
+    case t_base_type::TYPE_UUID:
+      return "TType.UUID";
     default:
       throw "compiler error: unhandled type";
     }
@@ -2992,7 +3106,6 @@ std::string t_py_generator::display_name() const {
   return "Python";
 }
 
-
 THRIFT_REGISTER_GENERATOR(
     py,
     "Python",
@@ -3015,4 +3128,5 @@ THRIFT_REGISTER_GENERATOR(
     "                     Package prefix for generated files.\n"
     "    old_style:       Deprecated. Generate old-style classes.\n"
     "    enum:            Generates Python's IntEnum, connects thrift to python enums. Python 3.4 and higher.\n"
+    "    type_hints:      Generate type hints and type checks in write method. Requires the enum option.\n"
 )
