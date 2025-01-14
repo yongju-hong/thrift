@@ -17,33 +17,16 @@
  * under the License.
  */
 
-#ifndef T_LIST_H
-#define T_LIST_H
+namespace * test.SimpleException
 
-#include "thrift/parse/t_container.h"
+exception Error {
+  1: i32    ErrorCode = 42
+  /** test name collision with Exception class */
+  2: Error  InnerException                  
+  /** test name collisions with Thrift Delphi implementation details */
+  3: uuid   ExceptionData = '00000000-4444-CCCC-ffff-0123456789ab'    
+}
 
-/**
- * A list is a lightweight container type that just wraps another data type.
- *
- */
-class t_list : public t_container {
-public:
-  t_list(t_type* elem_type) : elem_type_(elem_type) {}
 
-  t_type* get_elem_type() const { return elem_type_; }
 
-  bool is_list() const override { return true; }
-
-  void validate() const {
-#ifndef ALLOW_EXCEPTIONS_AS_TYPE
-    if( get_elem_type()->get_true_type()->is_xception()) {
-      failure("exception type \"%s\" cannot be used inside a list", get_elem_type()->get_name().c_str());
-    }
-#endif
-  }
-
-private:
-  t_type* elem_type_;
-};
-
-#endif
+// EOF

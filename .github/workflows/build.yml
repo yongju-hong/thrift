@@ -67,9 +67,9 @@ jobs:
       - name: Run thrift version
         run: /usr/local/bin/thrift -version
 
-      # only upload while building ubuntu-22.04
+      # only upload while building ubuntu-24.04
       - name: Archive built thrift compiler
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.os == 'ubuntu-24.04'
         uses: actions/upload-artifact@v4
         with:
           name: thrift-compiler
@@ -78,7 +78,7 @@ jobs:
 
   lib-php:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         php-version: [7.1, 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3]
@@ -131,7 +131,7 @@ jobs:
 
   lib-go:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         go:
@@ -191,7 +191,7 @@ jobs:
 
   lib-java-kotlin:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       GRADLE_VERSION: "8.4"
     steps:
@@ -299,7 +299,7 @@ jobs:
 
   lib-netstd:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
     steps:
@@ -312,9 +312,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends curl openssl ca-certificates
 
 #      the sdk is installed by default, but keep this step for reference
-#      - name: Set up .NET SDK
-#        run: |
-#          sudo apt-get install -y --no-install-recommends dotnet-sdk-8.0
+#      caveat: net9 is (currently?) NOT installed, so manually again
+      - name: Set up .NET SDK
+        run: |
+          sudo apt-get install -y --no-install-recommends dotnet-sdk-9.0
+#      end
 
       - name: Run bootstrap
         run: ./bootstrap.sh
@@ -360,7 +362,7 @@ jobs:
 
   lib-swift:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -396,9 +398,9 @@ jobs:
 
   lib-rust:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
-      TOOLCHAIN_VERSION: 1.65.0
+      TOOLCHAIN_VERSION: 1.83.0
     steps:
       - uses: actions/checkout@v4
 
@@ -461,7 +463,7 @@ jobs:
 
   lib-python:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version:
@@ -517,6 +519,32 @@ jobs:
       - name: Run make check for python
         run: make -C lib/py check
 
+  lib-nodejs:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure
+        run: |
+          ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-nodejs/with-nodejs/')
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run tests
+        run: make -C lib/nodejs check
+
   cross-test:
     needs:
       - lib-java-kotlin
@@ -524,7 +552,7 @@ jobs:
       - lib-rust
       - lib-go
       - lib-python
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         server_lang: ['java', 'kotlin', 'go', 'rs', 'swift']
