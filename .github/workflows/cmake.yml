@@ -16,7 +16,7 @@ jobs:
   compiler:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies
         run: |
@@ -38,3 +38,11 @@ jobs:
         run: |
           cd cmake_build
           ctest -j$(nproc)
+
+      - name: Upload LastTest log
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: cmake-LastTest-log
+          path: cmake_build/Testing/Temporary/LastTest.log
+          if-no-files-found: warn

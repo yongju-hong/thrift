@@ -33,8 +33,9 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    if: false   # currently broken and no maintainers around -> see THRIFT-5917        
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Dryrun
         working-directory: lib/rs
         run: cargo publish --dry-run
