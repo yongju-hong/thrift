@@ -137,12 +137,13 @@ RUN apt-get install -y --no-install-recommends \
       dart=$DART_VERSION
 ENV PATH /usr/lib/dart/bin:$PATH
 
+# Because Ubuntu 20.04 turned EOL in April/May 2025, Microsoft does not support .NET 9 or higher on that platform
 RUN apt-get install -y --no-install-recommends \
       `# dotnet core dependencies` \
-      dotnet-sdk-9.0 \
-      dotnet-runtime-9.0 \
-      aspnetcore-runtime-9.0 \
-      dotnet-apphost-pack-9.0
+      dotnet-sdk-8.0 \
+      dotnet-runtime-8.0 \
+      aspnetcore-runtime-8.0 \
+      dotnet-apphost-pack-8.0
 
 # Erlang dependencies
 ARG ERLANG_OTP_VERSION=23.3.4.11
@@ -159,9 +160,9 @@ RUN apt-get install -y --no-install-recommends \
       libglib2.0-dev
 
 # golang
-ENV GOLANG_VERSION 1.21.7
+ENV GOLANG_VERSION 1.24.3
 ENV GOLANG_DOWNLOAD_URL https://go.dev/dl/go$GOLANG_VERSION.linux-amd64.tar.gz
-ENV GOLANG_DOWNLOAD_SHA256 13b76a9b2a26823e53062fa841b07087d48ae2ef2936445dc34c4ae03293702c
+ENV GOLANG_DOWNLOAD_SHA256 3333f6ea53afa971e9078895eaa4ac7204a8c6b5c68c10e6bc9a33e8e391bdd8
 RUN curl -fsSL "$GOLANG_DOWNLOAD_URL" -o golang.tar.gz && \
       echo "$GOLANG_DOWNLOAD_SHA256  golang.tar.gz" | sha256sum -c - && \
       tar -C /usr/local -xzf golang.tar.gz && \
@@ -250,8 +251,11 @@ RUN apt-get install -y --no-install-recommends \
       php7.4-curl \
       php7.4-xdebug \
       php-pear \
-      re2c \
-      composer
+      re2c
+
+# Install Composer 2 explicitly to avoid distro package version drift.
+RUN curl -sS https://getcomposer.org/installer | php -- --2 --install-dir=/usr/local/bin --filename=composer && \
+    composer --version
 
 RUN apt-get install -y --no-install-recommends \
       `# Python3 dependencies` \
@@ -260,10 +264,9 @@ RUN apt-get install -y --no-install-recommends \
       python3-all-dev \
       python3-pip \
       python3-setuptools \
-      python3-tornado \
-      python3-twisted \
-      python3-wheel \
-      python3-zope.interface
+      python3-wheel
+
+RUN python3 -m pip install --no-cache-dir --upgrade "tornado>=6.3.0" "twisted>=24.3.0" "zope.interface>=6.1"
 
 RUN apt-get install -y --no-install-recommends \
       `# Ruby dependencies` \

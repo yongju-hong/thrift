@@ -450,7 +450,11 @@ void t_py_generator::init_generator() {
            << "from thrift.transport import TTransport" << '\n'
            << import_dynbase_;
 
-  f_types_ << "all_structs = []" << '\n';
+  if (gen_type_hints_) {
+    f_types_ << "all_structs: list[typing.Any] = []" << '\n';
+  } else {
+    f_types_ << "all_structs = []" << '\n';
+  }
 
   f_consts_ <<
     py_autogen_comment() << '\n' <<
@@ -854,6 +858,14 @@ void t_py_generator::generate_py_struct_definition(ostream& out,
   std::string thrift_spec_type = gen_type_hints_ ? ": typing.Any" : "";
   out << indent() << "thrift_spec" << thrift_spec_type << " = None" << '\n';
 
+  if (gen_type_hints_ && is_immutable(tstruct) && members.size() > 0) {
+    out << '\n';
+    for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
+      indent(out) << (*m_iter)->get_name()
+                  << member_hint((*m_iter)->get_type(), (*m_iter)->get_req()) << '\n';
+    }
+  }
+
   out << '\n';
 
   /*
@@ -1004,8 +1016,8 @@ void t_py_generator::generate_py_struct_definition(ostream& out,
         t_type* type = (*m_iter)->get_type();
         if (type->is_enum()) {
           out << indent() << "if name == \"" << (*m_iter)->get_name() << "\":" << '\n'
-              << indent() << indent_str() << "super().__setattr__(name, value if hasattr(value, 'value') else "
-              << type_name(type) << ".__members__.get(value))" << '\n'
+              << indent() << indent_str() << "super().__setattr__(name, value if hasattr(value, 'value') or value is None else "
+              << type_name(type) << "(value))" << '\n'
               << indent() << indent_str() << "return" << '\n';
         }
       }
@@ -1487,7 +1499,7 @@ void t_py_generator::generate_service_client(t_service* tservice) {
 
   if (gen_tornado_ && extends.empty()) {
     f_service_ << '\n' <<
-      indent() << "@gen.engine" << '\n' <<
+      indent() << "@gen.coroutine" << '\n' <<
       indent() << "def _start_receiving(self):" << '\n';
     indent_up();
     indent(f_service_) << "while True:" << '\n';
@@ -1911,7 +1923,9 @@ void t_py_generator::generate_service_remote(t_service* tservice) {
         first_arg = false;
       else
         f_remote << " ";
-      if (args[i]->get_type()->is_string()) {
+      if (args[i]->get_type()->is_binary()) {
+        f_remote << "args[" << i << "].encode('utf-8'),";
+      } else if (args[i]->get_type()->is_string()) {
         f_remote << "args[" << i << "],";
       } else {
         f_remote << "eval(args[" << i << "]),";

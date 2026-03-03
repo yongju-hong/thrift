@@ -56,6 +56,9 @@ public:
   t_rs_generator(t_program* program, const std::map<std::string, std::string>&, const std::string&)
     : t_generator(program) {
     gen_dir_ = get_out_dir();
+
+    fprintf(stderr, "We are sorry, but for the lack of active maintainers, the RUST compiler target is being deprecated and may be removed in the next version. Feel free to contact the dev mailing list (dev@thrift.apache.org) for further details.\n");
+
   }
 
   /**
@@ -1840,9 +1843,19 @@ void t_rs_generator::render_union_sync_read(const string& union_name, t_struct* 
   render_thrift_error("Protocol", "ProtocolError", "ProtocolErrorKind::InvalidData",
                       "\"received multiple fields for union from remote " + union_name + "\"");
   indent_down();
+  f_gen_ << indent() << "} else if let Some(ret) = ret {" << '\n';
+  indent_up();
+  f_gen_ << indent() << "Ok(ret)" << '\n';
+  indent_down();
   f_gen_ << indent() << "} else {" << '\n';
   indent_up();
-  f_gen_ << indent() << "Ok(ret.expect(\"return value should have been constructed\"))" << '\n';
+  f_gen_ << indent() << "Err(" << '\n';
+  indent_up();
+  f_gen_ << indent() << "thrift::Error::Protocol(" << '\n';
+  f_gen_ << indent() << "  ProtocolError::new(ProtocolErrorKind::InvalidData, \"return value should have been constructed\")" << '\n';
+  f_gen_ << indent() << ")" << '\n';
+  indent_down();
+  f_gen_ << indent() << ")" << '\n';
   indent_down();
   f_gen_ << indent() << "}" << '\n';
 
@@ -2423,7 +2436,7 @@ void t_rs_generator::render_sync_processor_definition_and_impl(t_service* tservi
   f_gen_ << indent() << "pub struct " << service_processor_name << "<H: " << handler_trait_name
          << "> {" << '\n';
   indent_up();
-  f_gen_ << indent() << "handler: H," << '\n';
+  f_gen_ << indent() << "pub handler: H," << '\n';
   indent_down();
   f_gen_ << indent() << "}" << '\n';
   f_gen_ << '\n';

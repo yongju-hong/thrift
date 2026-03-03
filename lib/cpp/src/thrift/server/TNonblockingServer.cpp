@@ -296,7 +296,7 @@ public:
     if (!notifyIOThread()) {
       server_->decrementActiveProcessors();
       close();
-      GlobalOutput.printf("[ERROR] TConnection::forceClose: failed write on notify pipe, closing.");
+      TOutput::instance().printf("[ERROR] TConnection::forceClose: failed write on notify pipe, closing.");
       throw TException("TConnection::forceClose: failed write on notify pipe");
     }
   }
@@ -342,21 +342,21 @@ public:
         }
       }
     } catch (const TTransportException& ttx) {
-      GlobalOutput.printf("TNonblockingServer: client died: %s", ttx.what());
+      TOutput::instance().printf("TNonblockingServer: client died: %s", ttx.what());
     } catch (const std::bad_alloc&) {
-      GlobalOutput("TNonblockingServer: caught bad_alloc exception.");
+      TOutput::instance()("TNonblockingServer: caught bad_alloc exception.");
       exit(1);
     } catch (const std::exception& x) {
-      GlobalOutput.printf("TNonblockingServer: process() exception: %s: %s",
+      TOutput::instance().printf("TNonblockingServer: process() exception: %s: %s",
                           typeid(x).name(),
                           x.what());
     } catch (...) {
-      GlobalOutput.printf("TNonblockingServer: unknown exception while processing.");
+      TOutput::instance().printf("TNonblockingServer: unknown exception while processing.");
     }
 
     // Signal completion back to the libevent thread via a pipe
     if (!connection_->notifyIOThread()) {
-      GlobalOutput.printf("TNonblockingServer: failed to notifyIOThread, closing.");
+      TOutput::instance().printf("TNonblockingServer: failed to notifyIOThread, closing.");
       connection_->server_->decrementActiveProcessors();
       connection_->close();
       throw TException("TNonblockingServer::Task::run: failed write on notify pipe");
@@ -450,7 +450,7 @@ void TNonblockingServer::TConnection::workSocket() {
         //In Nonblocking SSLSocket some operations need to be retried again.
         //Current approach is parsing exception message, but a better solution needs to be investigated.
         if(!strstr(te.what(), "retry")) {
-          GlobalOutput.printf("TConnection::workSocket(): %s", te.what());
+          TOutput::instance().printf("TConnection::workSocket(): %s", te.what());
           close();
 
           return;
@@ -467,7 +467,7 @@ void TNonblockingServer::TConnection::workSocket() {
       if (readWant_ > server_->getMaxFrameSize()) {
         // Don't allow giant frame sizes.  This prevents bad clients from
         // causing us to try and allocate a giant buffer.
-        GlobalOutput.printf(
+        TOutput::instance().printf(
             "TNonblockingServer: frame size too large "
             "(%" PRIu32 " > %" PRIu64
             ") from client %s. "
@@ -497,7 +497,7 @@ void TNonblockingServer::TConnection::workSocket() {
     case SOCKET_RECV:
       // It is an error to be in this state if we already have all the data
       if (!(readBufferPos_ < readWant_)) {
-        GlobalOutput.printf("TNonblockingServer: frame size too short: readBufferPos_(%d), readWant_(%d)", readBufferPos_, readWant_);
+        TOutput::instance().printf("TNonblockingServer: frame size too short: readBufferPos_(%d), readWant_(%d)", readBufferPos_, readWant_);
         close();
         return;
       }
@@ -510,7 +510,7 @@ void TNonblockingServer::TConnection::workSocket() {
         //In Nonblocking SSLSocket some operations need to be retried again.
         //Current approach is parsing exception message, but a better solution needs to be investigated.
         if(!strstr(te.what(), "retry")) {
-          GlobalOutput.printf("TConnection::workSocket(): %s", te.what());
+          TOutput::instance().printf("TConnection::workSocket(): %s", te.what());
           close();
         }
 
@@ -546,7 +546,7 @@ void TNonblockingServer::TConnection::workSocket() {
 
       // If there is no data to send, then let us move on
       if (writeBufferPos_ == writeBufferSize_) {
-        GlobalOutput("WARNING: Send state with no data to send");
+        TOutput::instance()("WARNING: Send state with no data to send");
         transition();
         return;
       }
@@ -555,7 +555,7 @@ void TNonblockingServer::TConnection::workSocket() {
         left = writeBufferSize_ - writeBufferPos_;
         sent = tSocket_->write_partial(writeBuffer_ + writeBufferPos_, left);
       } catch (TTransportException& te) {
-        GlobalOutput.printf("TConnection::workSocket()::SOCKET_SEND: %s ", te.what());
+        TOutput::instance().printf("TConnection::workSocket()::SOCKET_SEND: %s ", te.what());
         close();
         return;
       }
@@ -573,7 +573,7 @@ void TNonblockingServer::TConnection::workSocket() {
       return;
 
     default:
-      GlobalOutput.printf("Unexpected Socket State %d", socketState_);
+      TOutput::instance().printf("Unexpected Socket State %d", socketState_);
       assert(0);
       return;
     }
@@ -638,11 +638,11 @@ void TNonblockingServer::TConnection::transition() {
         server_->addTask(task);
       } catch (IllegalStateException& ise) {
         // The ThreadManager is not ready to handle any more tasks (it's probably shutting down).
-        GlobalOutput.printf("IllegalStateException: Server::process() %s", ise.what());
+        TOutput::instance().printf("IllegalStateException: Server::process() %s", ise.what());
         server_->decrementActiveProcessors();
         close();
       } catch (TimedOutException& to) {
-        GlobalOutput.printf("[ERROR] TimedOutException: Server::process() %s", to.what());
+        TOutput::instance().printf("[ERROR] TimedOutException: Server::process() %s", to.what());
         server_->decrementActiveProcessors();
         close();
       } catch (TooManyPendingTasksException &so) {
@@ -656,7 +656,7 @@ void TNonblockingServer::TConnection::transition() {
             protocol::TMessageType mtype;
             inRaw->readMessageBegin(fname, mtype, seqid);
         } catch(const std::exception& e) {
-          GlobalOutput.printf("[ERROR] server_->addTask() TooManyPendingTasksException raised an exception: %s", e.what());
+          TOutput::instance().printf("[ERROR] server_->addTask() TooManyPendingTasksException raised an exception: %s", e.what());
         }
         ::apache::thrift::TApplicationException x("TooManyPendingTasksException");
         outputProtocol_->writeMessageBegin(fname, ::apache::thrift::protocol::T_EXCEPTION, seqid);
@@ -664,19 +664,19 @@ void TNonblockingServer::TConnection::transition() {
         outputProtocol_->writeMessageEnd();
         outputProtocol_->getTransport()->writeEnd();
         outputProtocol_->getTransport()->flush();
-        //GlobalOutput.printf("[ERROR] TooManyPendingTasksException: Server::process() %s", so.what());
+        //TOutput::instance().printf("[ERROR] TooManyPendingTasksException: Server::process() %s", so.what());
         if (!notifyIOThread()) {
-          GlobalOutput.printf("[ERROR] server_->addTask(): failed to notifyIOThread, closing.");
+          TOutput::instance().printf("[ERROR] server_->addTask(): failed to notifyIOThread, closing.");
           server_->decrementActiveProcessors();
           close();
         }
         return;
       } catch(const std::exception& e) {
-        GlobalOutput.printf("[ERROR] server_->addTask() raised an exception: %s", e.what());
+        TOutput::instance().printf("[ERROR] server_->addTask() raised an exception: %s", e.what());
         server_->decrementActiveProcessors();
         close();
       } catch(...) {
-        GlobalOutput.printf("[ERROR] server_->addTask() raised an unknown exception");
+        TOutput::instance().printf("[ERROR] server_->addTask() raised an unknown exception");
         server_->decrementActiveProcessors();
         close();
       }
@@ -690,7 +690,7 @@ void TNonblockingServer::TConnection::transition() {
         // Invoke the processor
         processor_->process(inputProtocol_, outputProtocol_, connectionContext_);
       } catch (const TTransportException& ttx) {
-        GlobalOutput.printf(
+        TOutput::instance().printf(
             "TNonblockingServer transport error in "
             "process(): %s",
             ttx.what());
@@ -698,14 +698,14 @@ void TNonblockingServer::TConnection::transition() {
         close();
         return;
       } catch (const std::exception& x) {
-        GlobalOutput.printf("Server::process() uncaught exception: %s: %s",
+        TOutput::instance().printf("Server::process() uncaught exception: %s: %s",
                             typeid(x).name(),
                             x.what());
         server_->decrementActiveProcessors();
         close();
         return;
       } catch (...) {
-        GlobalOutput.printf("Server::process() unknown exception");
+        TOutput::instance().printf("Server::process() unknown exception");
         server_->decrementActiveProcessors();
         close();
         return;
@@ -800,7 +800,7 @@ void TNonblockingServer::TConnection::transition() {
       auto* newBuffer = (uint8_t*)std::realloc(readBuffer_, newSize);
       if (newBuffer == nullptr) {
         // nothing else to be done...
-        GlobalOutput.printf("server::transition() ERROR: failed to realloc size(%s)", newSize);
+        TOutput::instance().printf("server::transition() ERROR: failed to realloc size(%s)", newSize);
         throw std::bad_alloc();
       }
       readBuffer_ = newBuffer;
@@ -822,7 +822,7 @@ void TNonblockingServer::TConnection::transition() {
     return;
 
   default:
-    GlobalOutput.printf("Unexpected Application State %d", appState_);
+    TOutput::instance().printf("Unexpected Application State %d", appState_);
     assert(0);
   }
 }
@@ -835,7 +835,7 @@ void TNonblockingServer::TConnection::setFlags(short eventFlags) {
 
   // Delete a previously existing event
   if (eventFlags_ && event_del(&event_) == -1) {
-    GlobalOutput.perror("TConnection::setFlags() event_del", THRIFT_GET_SOCKET_ERROR);
+    TOutput::instance().perror("TConnection::setFlags() event_del", THRIFT_GET_SOCKET_ERROR);
     return;
   }
 
@@ -879,7 +879,7 @@ void TNonblockingServer::TConnection::setFlags(short eventFlags) {
 
   // Add the event
   if (event_add(&event_, nullptr) == -1) {
-    GlobalOutput.perror("TConnection::setFlags(): could not event_add", THRIFT_GET_SOCKET_ERROR);
+    TOutput::instance().perror("TConnection::setFlags(): could not event_add", THRIFT_GET_SOCKET_ERROR);
   }
 }
 
@@ -1026,7 +1026,7 @@ void TNonblockingServer::handleEvent(THRIFT_SOCKET fd, short which) {
 
     // Fail fast if we could not create a TConnection object
     if (clientConnection == nullptr) {
-      GlobalOutput.printf("thriftServerEventHandler: failed TConnection factory");
+      TOutput::instance().printf("thriftServerEventHandler: failed TConnection factory");
       clientSocket->close();
       return;
     }
@@ -1047,7 +1047,7 @@ void TNonblockingServer::handleEvent(THRIFT_SOCKET fd, short which) {
       clientConnection->transition();
     } else {
       if (!clientConnection->notifyIOThread()) {
-        GlobalOutput.perror("[ERROR] notifyIOThread failed on fresh connection, closing", errno);
+        TOutput::instance().perror("[ERROR] notifyIOThread failed on fresh connection, closing", errno);
         clientConnection->close();
       }
     }
@@ -1080,13 +1080,13 @@ bool TNonblockingServer::serverOverloaded() {
   size_t activeConnections = numTConnections_ - connectionStack_.size();
   if (numActiveProcessors_ > maxActiveProcessors_ || activeConnections > maxConnections_) {
     if (!overloaded_) {
-      GlobalOutput.printf("TNonblockingServer: overload condition begun.");
+      TOutput::instance().printf("TNonblockingServer: overload condition begun.");
       overloaded_ = true;
     }
   } else {
     if (overloaded_ && (numActiveProcessors_ <= overloadHysteresis_ * maxActiveProcessors_)
         && (activeConnections <= overloadHysteresis_ * maxConnections_)) {
-      GlobalOutput.printf(
+      TOutput::instance().printf(
           "TNonblockingServer: overload ended; "
           "%u dropped (%llu total)",
           nConnectionsDropped_,
@@ -1114,7 +1114,7 @@ bool TNonblockingServer::drainPendingTask() {
 
 void TNonblockingServer::expireClose(std::shared_ptr<Runnable> task) {
   TConnection* connection = static_cast<TConnection::Task*>(task.get())->getTConnection();
-  //GlobalOutput.printf("expireClose %p, %p, %d", connection, connection->getServer(), connection->getState());
+  //TOutput::instance().printf("expireClose %p, %p, %d", connection, connection->getServer(), connection->getState());
   assert(connection && connection->getServer() && connection->getState() == APP_WAIT_TASK);
   connection->forceClose();
 }
@@ -1160,7 +1160,7 @@ void TNonblockingServer::registerEvents(event_base* user_event_base) {
   assert(ioThreads_.size() == numIOThreads_);
   assert(ioThreads_.size() > 0);
 
-  GlobalOutput.printf("TNonblockingServer: Serving with %d io threads.",
+  TOutput::instance().printf("TNonblockingServer: Serving with %d io threads.",
                       ioThreads_.size());
 
   // Launch all the secondary IO threads in separate threads
@@ -1199,7 +1199,7 @@ void TNonblockingServer::serve() {
   // Ensure all threads are finished before exiting serve()
   for (uint32_t i = 0; i < ioThreads_.size(); ++i) {
     ioThreads_[i]->join();
-    GlobalOutput.printf("TNonblocking: join done for IO thread #%d", i);
+    TOutput::instance().printf("TNonblocking: join done for IO thread #%d", i);
   }
 }
 
@@ -1231,7 +1231,7 @@ TNonblockingIOThread::~TNonblockingIOThread() {
 
   if (listenSocket_ != THRIFT_INVALID_SOCKET) {
     if (0 != ::THRIFT_CLOSESOCKET(listenSocket_)) {
-      GlobalOutput.perror("TNonblockingIOThread listenSocket_ close(): ", THRIFT_GET_SOCKET_ERROR);
+      TOutput::instance().perror("TNonblockingIOThread listenSocket_ close(): ", THRIFT_GET_SOCKET_ERROR);
     }
     listenSocket_ = THRIFT_INVALID_SOCKET;
   }
@@ -1239,7 +1239,7 @@ TNonblockingIOThread::~TNonblockingIOThread() {
   for (auto notificationPipeFD : notificationPipeFDs_) {
     if (notificationPipeFD >= 0) {
       if (0 != ::THRIFT_CLOSESOCKET(notificationPipeFD)) {
-        GlobalOutput.perror("TNonblockingIOThread notificationPipe close(): ",
+        TOutput::instance().perror("TNonblockingIOThread notificationPipe close(): ",
                             THRIFT_GET_SOCKET_ERROR);
       }
       notificationPipeFD = THRIFT_INVALID_SOCKET;
@@ -1249,7 +1249,7 @@ TNonblockingIOThread::~TNonblockingIOThread() {
 
 void TNonblockingIOThread::createNotificationPipe() {
   if (evutil_socketpair(AF_LOCAL, SOCK_STREAM, 0, notificationPipeFDs_) == -1) {
-    GlobalOutput.perror("TNonblockingServer::createNotificationPipe ", EVUTIL_SOCKET_ERROR());
+    TOutput::instance().perror("TNonblockingServer::createNotificationPipe ", EVUTIL_SOCKET_ERROR());
     throw TException("can't create notification pipe");
   }
   if (evutil_make_socket_nonblocking(notificationPipeFDs_[0]) < 0
@@ -1290,7 +1290,7 @@ void TNonblockingIOThread::registerEvents() {
 
   // Print some libevent stats
   if (number_ == 0) {
-    GlobalOutput.printf("TNonblockingServer: using libevent %s method %s",
+    TOutput::instance().printf("TNonblockingServer: using libevent %s method %s",
                         event_get_version(),
                         event_base_get_method(eventBase_));
   }
@@ -1310,7 +1310,7 @@ void TNonblockingIOThread::registerEvents() {
           "TNonblockingServer::serve(): "
           "event_add() failed on server listen event");
     }
-    GlobalOutput.printf("TNonblocking: IO thread #%d registered for listen.", number_);
+    TOutput::instance().printf("TNonblocking: IO thread #%d registered for listen.", number_);
   }
 
   createNotificationPipe();
@@ -1331,7 +1331,7 @@ void TNonblockingIOThread::registerEvents() {
         "TNonblockingServer::serve(): "
         "event_add() failed on task-done notification event");
   }
-  GlobalOutput.printf("TNonblocking: IO thread #%d registered for notify.", number_);
+  TOutput::instance().printf("TNonblocking: IO thread #%d registered for notify.", number_);
 }
 
 bool TNonblockingIOThread::notify(TNonblockingServer::TConnection* conn) {
@@ -1435,18 +1435,18 @@ void TNonblockingIOThread::notifyHandler(evutil_socket_t fd, short which, void* 
       connection->transition();
     } else if (nBytes > 0) {
       // throw away these bytes and hope that next time we get a solid read
-      GlobalOutput.printf("notifyHandler: Bad read of %d bytes, wanted %d", nBytes, kSize);
+      TOutput::instance().printf("notifyHandler: Bad read of %d bytes, wanted %d", nBytes, kSize);
       ioThread->breakLoop(true);
       return;
     } else if (nBytes == 0) {
-      GlobalOutput.printf("notifyHandler: Notify socket closed!");
+      TOutput::instance().printf("notifyHandler: Notify socket closed!");
       ioThread->breakLoop(false);
       // exit the loop
       break;
     } else { // nBytes < 0
       if (THRIFT_GET_SOCKET_ERROR != THRIFT_EWOULDBLOCK
           && THRIFT_GET_SOCKET_ERROR != THRIFT_EAGAIN) {
-        GlobalOutput.perror("TNonblocking: notifyHandler read() failed: ", THRIFT_GET_SOCKET_ERROR);
+        TOutput::instance().perror("TNonblocking: notifyHandler read() failed: ", THRIFT_GET_SOCKET_ERROR);
         ioThread->breakLoop(true);
         return;
       }
@@ -1458,10 +1458,10 @@ void TNonblockingIOThread::notifyHandler(evutil_socket_t fd, short which, void* 
 
 void TNonblockingIOThread::breakLoop(bool error) {
   if (error) {
-    GlobalOutput.printf("TNonblockingServer: IO thread #%d exiting with error.", number_);
+    TOutput::instance().printf("TNonblockingServer: IO thread #%d exiting with error.", number_);
     // TODO: figure out something better to do here, but for now kill the
     // whole process.
-    GlobalOutput.printf("TNonblockingServer: aborting process.");
+    TOutput::instance().printf("TNonblockingServer: aborting process.");
     ::abort();
   }
 
@@ -1497,9 +1497,9 @@ void TNonblockingIOThread::setCurrentThreadHighPriority(bool value) {
 
   // Actually set the sched params for the current thread.
   if (0 == pthread_setschedparam(pthread_self(), policy, &sp)) {
-    GlobalOutput.printf("TNonblocking: IO Thread #%d using high-priority scheduler!", number_);
+    TOutput::instance().printf("TNonblocking: IO Thread #%d using high-priority scheduler!", number_);
   } else {
-    GlobalOutput.perror("TNonblocking: pthread_setschedparam(): ", THRIFT_GET_SOCKET_ERROR);
+    TOutput::instance().perror("TNonblocking: pthread_setschedparam(): ", THRIFT_GET_SOCKET_ERROR);
   }
 #else
   THRIFT_UNUSED_VARIABLE(value);
@@ -1516,7 +1516,7 @@ void TNonblockingIOThread::run() {
 
   if (eventBase_ != nullptr)
   {
-    GlobalOutput.printf("TNonblockingServer: IO thread #%d entering loop...", number_);
+    TOutput::instance().printf("TNonblockingServer: IO thread #%d entering loop...", number_);
     // Run libevent engine, never returns, invokes calls to eventHandler
     event_base_loop(eventBase_, 0);
 
@@ -1528,14 +1528,14 @@ void TNonblockingIOThread::run() {
     cleanupEvents();
   }
 
-  GlobalOutput.printf("TNonblockingServer: IO thread #%d run() done!", number_);
+  TOutput::instance().printf("TNonblockingServer: IO thread #%d run() done!", number_);
 }
 
 void TNonblockingIOThread::cleanupEvents() {
   // stop the listen socket, if any
   if (listenSocket_ != THRIFT_INVALID_SOCKET) {
     if (event_del(&serverEvent_) == -1) {
-      GlobalOutput.perror("TNonblockingIOThread::stop() event_del: ", THRIFT_GET_SOCKET_ERROR);
+      TOutput::instance().perror("TNonblockingIOThread::stop() event_del: ", THRIFT_GET_SOCKET_ERROR);
     }
   }
 
