@@ -93,6 +93,7 @@ check_PROGRAMS = \
 	UnitTestsUuidNoDirective \
 	TFDTransportTest \
 	TPipedTransportTest \
+	TTransportFactoryConfigTest \
 	DebugProtoTest \
 	JSONProtoTest \
 	OptionalRequiredTest \
@@ -102,12 +103,14 @@ check_PROGRAMS = \
 	TransportTest \
 	TInterruptTest \
 	TServerIntegrationTest \
+	TServerExceptionTest \
 	SecurityTest \
 	SecurityFromBufferTest \
 	ZlibTest \
 	TFileTransportTest \
 	link_test \
 	OpenSSLManualInitTest \
+	TSSLSocketMatchNameTest \
 	EnumTest \
 	RenderedDoubleConstantsTest \
 	AnnotationTest
@@ -117,7 +120,8 @@ noinst_PROGRAMS += \
 	processor_test
 check_PROGRAMS += \
 	TNonblockingServerTest \
-	TNonblockingSSLServerTest
+	TNonblockingSSLServerTest \
+	TEvhttpServerRequestContextTest
 endif
 
 TESTS_ENVIRONMENT= \
@@ -140,14 +144,20 @@ UnitTests_SOURCES = \
 	TServerTransportTest.cpp \
 	TTransportCheckThrow.h \
 	ThrifttReadCheckTests.cpp \
+	FrameBoundReadBudgetTest.cpp \
+	TWebSocketServerTest.cpp \
+	THttpBufferBoundTest.cpp \
+	THttpHeaderParseTest.cpp \
 	Thrift5272.cpp \
 	TUuidTest.cpp
 
 UnitTests_LDADD = \
   libtestgencpp.la \
+  $(top_builddir)/lib/cpp/libthriftz.la \
   $(BOOST_TEST_LDADD) \
   $(BOOST_SYSTEM_LDADD) \
-  $(BOOST_THREAD_LDADD)
+  $(BOOST_THREAD_LDADD) \
+  -lz
 
 UnitTestsUuid_SOURCES = \
 	UnitTestMain.cpp \
@@ -189,6 +199,16 @@ TServerIntegrationTest_SOURCES = \
 	TServerIntegrationTest.cpp
 
 TServerIntegrationTest_LDADD = \
+  libtestgencpp.la \
+  libprocessortest.la \
+  $(BOOST_TEST_LDADD) \
+  $(BOOST_SYSTEM_LDADD) \
+  $(BOOST_THREAD_LDADD)
+
+TServerExceptionTest_SOURCES = \
+	TServerExceptionTest.cpp
+
+TServerExceptionTest_LDADD = \
   libtestgencpp.la \
   libprocessortest.la \
   $(BOOST_TEST_LDADD) \
@@ -286,6 +306,17 @@ TPipedTransportTest_LDADD = \
 	$(BOOST_THREAD_LDADD)
 
 #
+# TTransportFactoryConfigTest
+#
+TTransportFactoryConfigTest_SOURCES = \
+	TTransportFactoryConfigTest.cpp
+
+TTransportFactoryConfigTest_LDADD =  \
+	$(top_builddir)/lib/cpp/libthrift.la \
+	$(top_builddir)/lib/cpp/libthriftz.la \
+	$(BOOST_TEST_LDADD)
+
+#
 # AllProtocolsTest
 #
 AllProtocolsTest_SOURCES = \
@@ -343,6 +374,17 @@ TNonblockingSSLServerTest_LDADD = libprocessortest.la \
                                $(BOOST_CHRONO_LDADD) \
                                $(BOOST_SYSTEM_LDADD) \
                                $(BOOST_THREAD_LDADD) \
+                               $(LIBEVENT_LIBS)
+
+#
+# TEvhttpServerRequestContextTest
+#
+TEvhttpServerRequestContextTest_SOURCES = TEvhttpServerRequestContextTest.cpp
+
+TEvhttpServerRequestContextTest_LDADD = $(top_builddir)/lib/cpp/libthrift.la \
+                               $(top_builddir)/lib/cpp/libthriftnb.la \
+                               $(BOOST_TEST_LDADD) \
+                               $(BOOST_LDFLAGS) \
                                $(LIBEVENT_LIBS)
 
 #
@@ -413,6 +455,19 @@ OpenSSLManualInitTest_LDADD = \
 	$(OPENSSL_LDFLAGS) \
 	$(OPENSSL_LIBS)
 
+TSSLSocketMatchNameTest_SOURCES = \
+	TSSLSocketMatchNameTest.cpp
+
+# The test runs its listener on a boost::thread, so it links the boost thread
+# library the same way the other tests that start one do.
+TSSLSocketMatchNameTest_LDADD = \
+	$(top_builddir)/lib/cpp/libthrift.la \
+	$(BOOST_TEST_LDADD) \
+	$(BOOST_SYSTEM_LDADD) \
+	$(BOOST_THREAD_LDADD) \
+	$(OPENSSL_LDFLAGS) \
+	$(OPENSSL_LIBS)
+
 #
 # Common thrift code generation rules
 #
@@ -457,8 +512,8 @@ gen-cpp/Thrift5272_types.cpp gen-cpp/Thrift5272_types.h: Thrift5272.thrift
 gen-cpp/ChildService.cpp gen-cpp/ChildService.h gen-cpp/ParentService.cpp gen-cpp/ParentService.h gen-cpp/proc_types.cpp gen-cpp/proc_types.h: processor/proc.thrift
 	$(THRIFT) --gen cpp:templates,cob_style $<
 
-AM_CPPFLAGS = $(BOOST_CPPFLAGS) -I$(top_srcdir)/lib/cpp/src -I$(top_srcdir)/lib/cpp/src/thrift -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -I.
-AM_LDFLAGS = $(BOOST_LDFLAGS)
+AM_CPPFLAGS = $(BOOST_CPPFLAGS) $(OPENSSL_INCLUDES) $(LIBEVENT_CPPFLAGS) -I$(top_srcdir)/lib/cpp/src -I$(top_srcdir)/lib/cpp/src/thrift -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -I.
+AM_LDFLAGS = $(BOOST_LDFLAGS) $(LIBEVENT_LDFLAGS)
 AM_CXXFLAGS = -Wall -Wextra -pedantic
 
 clean-local:

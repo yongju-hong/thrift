@@ -60,20 +60,23 @@ testServer()
 
 testEpisodicCompilation()
 {
+  local _server=$1
+  local _client=$2
+  echo "  [Episodic Variant: ${_server}:${_client}] Testing Client(${_client})/Server(${_server})";
   RET=0
   if [ -n "${COVER}" ]; then
-    ${ISTANBUL} cover ${EPISODIC_DIR}/server.js --dir ${REPORT_PREFIX}${COUNT} --handle-sigint &
+    ${ISTANBUL} cover ${EPISODIC_DIR}/server.js --dir ${REPORT_PREFIX}${COUNT} --handle-sigint -- --base "${_server}"   &
     COUNT=$((COUNT+1))
   else
-    node ${EPISODIC_DIR}/server.js &
+    node ${EPISODIC_DIR}/server.js --base "${_server}" &
   fi
   SERVERPID=$!
   sleep 0.1
   if [ -n "${COVER}" ]; then
-    ${ISTANBUL} cover ${EPISODIC_DIR}/client.js --dir ${REPORT_PREFIX}${COUNT} || RET=1
+    ${ISTANBUL} cover ${EPISODIC_DIR}/client.js --dir ${REPORT_PREFIX}${COUNT} -- --base "${_client}" || RET=1
     COUNT=$((COUNT+1))
   else
-    node ${EPISODIC_DIR}/client.js || RET=1
+    node ${EPISODIC_DIR}/client.js --base "${_client}" || RET=1
   fi
   kill -2 $SERVERPID || RET=1
   wait $SERVERPID
@@ -83,39 +86,52 @@ testEpisodicCompilation()
 
 TESTOK=0
 
-# generating Thrift code
+# generating Thrift code (legacy node-int64 — the default for js:node).
 
-${THRIFT_COMPILER} -o ${DIR} --gen js:node ${THRIFT_FILES_DIR}/v0.16/ThriftTest.thrift
+${THRIFT_COMPILER} -o ${DIR} --gen js:node ${THRIFT_FILES_DIR}/ThriftTest.thrift
 ${THRIFT_COMPILER} -o ${DIR} --gen js:node ${THRIFT_FILES_DIR}/JsDeepConstructorTest.thrift
+${THRIFT_COMPILER} -o ${DIR} --gen js:node ${THRIFT_FILES_DIR}/JsRecursionDepthTest.thrift
+${THRIFT_COMPILER} -o ${DIR} --gen js:node ${DIR}/MapKeyTest.thrift
 ${THRIFT_COMPILER} -o ${DIR} --gen js:node ${THRIFT_FILES_DIR}/Int64Test.thrift
 ${THRIFT_COMPILER} -o ${DIR} --gen js:node ${THRIFT_FILES_DIR}/Include.thrift
+${THRIFT_COMPILER} -o ${DIR} --gen js:node ${DIR}/ServiceExtendsTest.thrift
 mkdir ${DIR}/gen-nodejs-es6
-${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-es6 --gen js:node,es6 ${THRIFT_FILES_DIR}/v0.16/ThriftTest.thrift
+${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-es6 --gen js:node,es6 ${THRIFT_FILES_DIR}/ThriftTest.thrift
 ${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-es6 --gen js:node,es6 ${THRIFT_FILES_DIR}/JsDeepConstructorTest.thrift
 ${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-es6 --gen js:node,es6 ${THRIFT_FILES_DIR}/Int64Test.thrift
 ${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-es6 --gen js:node,es6 ${THRIFT_FILES_DIR}/Include.thrift
+${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-es6 --gen js:node,es6 ${DIR}/ServiceExtendsTest.thrift
 mkdir ${DIR}/gen-nodejs-esm
-${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-esm --gen js:node,es6,esm ${THRIFT_FILES_DIR}/v0.16/ThriftTest.thrift
+${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-esm --gen js:node,es6,esm ${THRIFT_FILES_DIR}/ThriftTest.thrift
 ${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-esm --gen js:node,es6,esm ${THRIFT_FILES_DIR}/JsDeepConstructorTest.thrift
 ${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-esm --gen js:node,es6,esm ${THRIFT_FILES_DIR}/Int64Test.thrift
 ${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-esm --gen js:node,es6,esm ${THRIFT_FILES_DIR}/Include.thrift
+${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-esm --gen js:node,es6,esm ${DIR}/ServiceExtendsTest.thrift
+
+# Opt-in BigInt codegen — only Int64Test.thrift is exercised by int64_bigint.test.js.
+mkdir ${DIR}/gen-nodejs-bigint
+${THRIFT_COMPILER} -out ${DIR}/gen-nodejs-bigint --gen js:node,es6,bigint ${THRIFT_FILES_DIR}/Int64Test.thrift
 
 # generate episodic compilation test code
 TYPES_PACKAGE=${EPISODIC_DIR}/node_modules/types-package
 
 # generate the first episode
 mkdir --parents ${EPISODIC_DIR}/gen-1/first-episode
-${THRIFT_COMPILER} -o ${EPISODIC_DIR}/gen-1/first-episode --gen js:node,thrift_package_output_directory=first-episode ${THRIFT_FILES_DIR}/Types.thrift
+${THRIFT_COMPILER} -o ${EPISODIC_DIR}/gen-1/first-episode --gen js:node,ts,thrift_package_output_directory=first-episode ${THRIFT_FILES_DIR}/Types.thrift
 
 # create a "package" from the first episode and "install" it, the episode file must be at the module root
 mkdir --parents ${TYPES_PACKAGE}/first-episode
 cp --force ${EPISODIC_DIR}/episodic_compilation.package.json ${TYPES_PACKAGE}/package.json
 cp --force ${EPISODIC_DIR}/gen-1/first-episode/gen-nodejs/Types_types.js ${TYPES_PACKAGE}/first-episode/
+cp --force ${EPISODIC_DIR}/gen-1/first-episode/gen-nodejs/Types_types.d.ts ${TYPES_PACKAGE}/first-episode/
+cp --force ${EPISODIC_DIR}/gen-1/first-episode/gen-nodejs/BaseService.js ${TYPES_PACKAGE}/first-episode/
+cp --force ${EPISODIC_DIR}/gen-1/first-episode/gen-nodejs/BaseService.d.ts ${TYPES_PACKAGE}/first-episode/
 cp --force ${EPISODIC_DIR}/gen-1/first-episode/gen-nodejs/thrift.js.episode ${TYPES_PACKAGE}
+rm --force --recursive ${EPISODIC_DIR}/gen-1
 
 # generate the second episode
 mkdir --parents ${EPISODIC_DIR}/gen-2/second-episode
-${THRIFT_COMPILER} -o ${EPISODIC_DIR}/gen-2/second-episode --gen js:node,imports=${TYPES_PACKAGE} ${THRIFT_FILES_DIR}/Service.thrift
+${THRIFT_COMPILER} -o ${EPISODIC_DIR}/gen-2/second-episode --gen js:node,ts,imports=${TYPES_PACKAGE} ${THRIFT_FILES_DIR}/Service.thrift
 if [ -f ${EPISODIC_DIR}/gen-2/second-episode/Types_types.js ]; then
   TESTOK=1
 fi
@@ -123,10 +139,33 @@ fi
 # unit tests
 
 node ${DIR}/binary.test.js || TESTOK=1
+node ${DIR}/bigint_helpers.test.js || TESTOK=1
+node ${DIR}/check_set_uniqueness.test.js || TESTOK=1
 node ${DIR}/header.test.js || TESTOK=1
 node ${DIR}/int64.test.js || TESTOK=1
+node ${DIR}/json_own_properties.test.js || TESTOK=1
+node ${DIR}/json_container_size.test.js || TESTOK=1
+node ${DIR}/json_field_lookup.test.js || TESTOK=1
+node ${DIR}/json_message_scan.test.js || TESTOK=1
+node ${DIR}/map_keys.test.js || TESTOK=1
+node ${DIR}/multiplexed_processor.test.js || TESTOK=1
+node ${DIR}/int64_bigint.test.js || TESTOK=1
 node ${DIR}/deep-constructor.test.js || TESTOK=1
+node ${DIR}/recursion_depth.test.js || TESTOK=1
+node ${DIR}/connection_transport.test.js || TESTOK=1
+node ${DIR}/stdio_client_errors.test.js || TESTOK=1
+node ${DIR}/ws_client_errors.test.js || TESTOK=1
+node ${DIR}/transport_receiver.test.js || TESTOK=1
+node ${DIR}/transport_reset.test.js || TESTOK=1
+node ${DIR}/server_error_events.test.js || TESTOK=1
+node ${DIR}/web_server_ws.test.js || TESTOK=1
+node ${DIR}/web_server_ws_fragments.test.js || TESTOK=1
+node ${DIR}/binary_message_scan.test.js || TESTOK=1
+node ${DIR}/uuid.test.js || TESTOK=1
+node ${DIR}/generated-exceptions.test.js || TESTOK=1
 node ${DIR}/include.test.mjs || TESTOK=1
+node ${DIR}/service_extends.test.mjs || TESTOK=1
+node ${DIR}/thrift_4987_xhr_protocol.test.mjs || TESTOK=1
 
 # integration tests
 
@@ -147,7 +186,12 @@ do
 done
 
 # episodic compilation test
-testEpisodicCompilation
+echo "Testing Episode Compilation"
+testEpisodicCompilation 'pure' 'pure' || TESTOK=1
+testEpisodicCompilation 'base' 'base' || TESTOK=1
+testEpisodicCompilation 'extend' 'extend' || TESTOK=1
+testEpisodicCompilation 'extend' 'base' || TESTOK=1
+testEpisodicCompilation 'base' 'pure' || TESTOK=1
 
 if [ -n "${COVER}" ]; then
   ${ISTANBUL} report --dir "${DIR}/../coverage" --include "${DIR}/../coverage/report*/coverage.json" lcov cobertura html

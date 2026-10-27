@@ -123,6 +123,7 @@ public:
   void init_generator() override;
   void close_generator() override;
   std::string display_name() const override;
+  std::string get_doc_type_name(t_type* type) override;
 
   void generate_consts(std::vector<t_const*> consts) override;
 
@@ -462,6 +463,11 @@ private:
   // themselves.
   friend class ProcessorGenerator;
 };
+
+std::string t_cpp_generator::get_doc_type_name(t_type* type) {
+  type = get_true_type(type);
+  return namespace_prefix(type->get_program()->get_namespace("cpp")) + type->get_name();
+}
 
 /**
  * Prepares for file generation by opening up the necessary file output
@@ -1450,15 +1456,28 @@ void t_cpp_generator::generate_struct_declaration(ostream& out,
 
   // Declare all fields
   if (gen_private_optional_ && !pointers) {
-    // When private_optional is enabled, declare non-optional fields first in public section
+    bool fields_are_public = true;
+
     for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-      if ((*m_iter)->get_req() != t_field::T_OPTIONAL) {
-        generate_java_doc(out, *m_iter);
-        indent(out) << declare_field(*m_iter,
-                                     gen_no_constructors_,
-                                     false,
-                                     !read) << '\n';
+      bool field_is_public = (*m_iter)->get_req() != t_field::T_OPTIONAL;
+      if (field_is_public != fields_are_public) {
+        indent_down();
+        out << '\n' << indent() << (field_is_public ? " public:" : " private:") << '\n';
+        indent_up();
+        fields_are_public = field_is_public;
       }
+
+      generate_java_doc(out, *m_iter);
+      indent(out) << declare_field(*m_iter,
+                                   gen_no_constructors_,
+                                   false,
+                                   !read) << '\n';
+    }
+
+    if (!fields_are_public) {
+      indent_down();
+      out << '\n' << indent() << " public:" << '\n';
+      indent_up();
     }
   } else {
     // Default behavior: all fields in public section
@@ -1573,34 +1592,6 @@ void t_cpp_generator::generate_struct_declaration(ostream& out,
     out << ";" << '\n';
   }
 
-  // Generate private section for optional fields when private_optional is enabled
-  if (gen_private_optional_ && !pointers) {
-    bool has_optional_fields = false;
-    for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-      if ((*m_iter)->get_req() == t_field::T_OPTIONAL) {
-        has_optional_fields = true;
-        break;
-      }
-    }
-    
-    if (has_optional_fields) {
-      indent_down();
-      out << '\n' << indent() << " private:" << '\n';
-      indent_up();
-      
-      // Declare optional fields in private section
-      for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-        if ((*m_iter)->get_req() == t_field::T_OPTIONAL) {
-          generate_java_doc(out, *m_iter);
-          indent(out) << declare_field(*m_iter,
-                                       gen_no_constructors_,
-                                       false,
-                                       !read) << '\n';
-        }
-      }
-    }
-  }
-
   // When private_optional is enabled, optional members may be private.
   // The generated namespace-scope swap() needs friend access.
   if (swap && gen_private_optional_) {
@@ -1626,7 +1617,11 @@ void t_cpp_generator::generate_struct_declaration(ostream& out,
     generate_struct_swap_decl(out, tstruct);
   }
 
-  if (is_user_struct) {
+  // When both private_optional and template_streamop are enabled, the friend
+  // function template declared inside the class body is sufficient (it is
+  // findable via ADL). Emitting a second namespace-scope declaration would
+  // place the 'friend' keyword outside a class, which is ill-formed.
+  if (is_user_struct && !(gen_private_optional_ && gen_template_streamop_)) {
     generate_struct_ostream_operator_decl(out, tstruct);
   }
 }
@@ -2147,13 +2142,16 @@ void generate_required_field_value(std::ostream& out, const t_field* field, bool
 void generate_optional_field_value(std::ostream& out, const t_field* field, bool use_printto) {
   out << "; (__isset." << field->get_name() << " ? ";
   if (use_printto) {
-    // For printTo, call directly without wrapping in (out ...)
+    // printTo() returns void. Both ternary branches must have the same type, so
+    // cast the false-branch to void as well. The non-printTo path below does not
+    // need the cast because both of its branches return the same stream reference.
     out << "printTo(out, " << field->get_name() << ")";
+    out << " : (void)(out << \"<null>\"))";
   } else {
-    // For to_string, need to wrap with (out << ...)
+    // Both branches return std::ostream&, so no cast is needed.
     out << "(out << to_string(" << field->get_name() << "))";
+    out << " : (out << \"<null>\"))";
   }
-  out << " : (out << \"<null>\"))";
 }
 
 void generate_field_value(std::ostream& out, const t_field* field, bool use_printto) {
@@ -3130,6 +3128,8 @@ void t_cpp_generator::generate_service_client(t_service* tservice, string style)
         } else {
           out << "recv_" << funname << "(" << seqIdUse << ");" << '\n';
         }
+      } else {
+        out << indent() << _this << "oprot_->getTransport()->onewayComplete();" << '\n';
       }
     } else {
       if (!(*f_iter)->is_oneway()) {
@@ -3890,7 +3890,7 @@ void t_cpp_generator::generate_process_function(t_service* tservice,
     if (gen_templates_) {
       out << indent() << "template <class Protocol_>" << '\n';
     }
-    const bool unnamed_oprot_seqid = tfunction->is_oneway() && !(gen_templates_ && !specialized);
+    const bool unnamed_oprot_seqid = false;
     out << "void " << tservice->get_name() << "Processor" << class_suffix << "::"
         << "process_" << tfunction->get_name() << "("
         << "int32_t" << (unnamed_oprot_seqid ? ", " : " seqid, ") << prot_type << "* iprot, "
@@ -3902,7 +3902,7 @@ void t_cpp_generator::generate_process_function(t_service* tservice,
     string resultname = tservice->get_name() + "_" + tfunction->get_name() + "_result";
 
     if (tfunction->is_oneway() && !unnamed_oprot_seqid) {
-      out << indent() << "(void) seqid;" << '\n' << indent() << "(void) oprot;" << '\n';
+      out << indent() << "(void) seqid;" << '\n';
     }
 
     out << indent() << "void* ctx = nullptr;" << '\n' << indent()
@@ -3995,6 +3995,8 @@ void t_cpp_generator::generate_process_function(t_service* tservice,
           << "x.write(oprot);" << '\n' << indent() << "oprot->writeMessageEnd();" << '\n'
           << indent() << "oprot->getTransport()->writeEnd();" << '\n' << indent()
           << "oprot->getTransport()->flush();" << '\n';
+    } else {
+      out << '\n' << indent() << "oprot->getTransport()->onewayComplete();" << '\n';
     }
     out << indent() << "return;" << '\n';
     indent_down();
@@ -4004,7 +4006,8 @@ void t_cpp_generator::generate_process_function(t_service* tservice,
     if (tfunction->is_oneway()) {
       out << indent() << "if (this->eventHandler_.get() != nullptr) {" << '\n' << indent()
           << "  this->eventHandler_->asyncComplete(ctx, " << service_func_name << ");" << '\n'
-          << indent() << "}" << '\n' << '\n' << indent() << "return;" << '\n';
+          << indent() << "}" << '\n' << '\n' << indent()
+          << "oprot->getTransport()->onewayComplete();" << '\n' << indent() << "return;" << '\n';
       indent_down();
       out << "}" << '\n' << '\n';
       return;
@@ -4472,7 +4475,8 @@ void t_cpp_generator::generate_deserialize_container(ostream& out, t_type* ttype
     out << indent() << "::apache::thrift::protocol::TType " << etype << ";" << '\n' << indent()
         << "xfer += iprot->readListBegin(" << etype << ", " << size << ");" << '\n';
     if (!use_push) {
-      indent(out) << prefix << ".resize(" << size << ");" << '\n';
+      indent(out) << prefix << ".reserve(::apache::thrift::protocol::preallocSize(" << size
+                  << "));" << '\n';
     }
   }
 
@@ -4546,7 +4550,16 @@ void t_cpp_generator::generate_deserialize_list_element(ostream& out,
     generate_deserialize_field(out, &felem);
     indent(out) << prefix << ".push_back(" << elem << ");" << '\n';
   } else {
-    t_field felem(tlist->get_elem_type(), prefix + "[" + index + "]");
+    // The vector's capacity was reserved (capped) from the declared count, so grow it one element
+    // at a time and read into the element just appended, rather than indexing into a full resize.
+    // std::vector<bool> has no emplace_back() before C++14, so a list of bool uses push_back().
+    (void)index;
+    if (tlist->get_elem_type()->get_true_type()->is_bool()) {
+      indent(out) << prefix << ".push_back(false);" << '\n';
+    } else {
+      indent(out) << prefix << ".emplace_back();" << '\n';
+    }
+    t_field felem(tlist->get_elem_type(), prefix + ".back()");
     generate_deserialize_field(out, &felem);
   }
 }

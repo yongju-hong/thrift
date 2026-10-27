@@ -73,9 +73,17 @@ class TStreamTransport extends TEndpointTransport {
                                              "Cannot read from null InputStream");
         }
 
+        // data is a fresh scratch buffer of length len, always filled from index 0; the caller's
+        // offset is honoured by appending to buf (an append-only BytesBuffer), as in TFramedTransport.
         var data : Bytes =  Bytes.alloc(len);
-        var size = InputStream.Read( data, off, len);
+        var size = InputStream.Read( data, 0, len);
         buf.addBytes( data, 0, size);
+
+        // Charge the read against the message budget, as every other endpoint does.
+        // MaxMessageSize is expressed as the bytes remaining to be read, so without this
+        // it has no effect here however much a message reads, as long as no single read
+        // exceeds it on its own.
+        CountConsumedMessageBytes(size);
         return size;
     }
 
@@ -101,6 +109,11 @@ class TStreamTransport extends TEndpointTransport {
         }
 
         OutputStream.Flush();
+
+        // One message is done with; give the next one its allowance back. TSocket does the
+        // same at the same point -- without it the budget would only ever shrink, and a
+        // long-lived connection would run itself out of it.
+        ResetConsumedMessageSize();
     }
 
 }

@@ -1,4 +1,5 @@
 # encoding: ascii-8bit
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -18,9 +19,9 @@
 # under the License.
 #
 
-require 'spec_helper'
+require "spec_helper"
 
-shared_examples_for 'a binary protocol' do
+shared_examples_for "a binary protocol" do
   before(:each) do
     @trans = Thrift::MemoryBufferTransport.new
     @prot = protocol_class.new(@trans)
@@ -41,27 +42,26 @@ shared_examples_for 'a binary protocol' do
   end
 
   it "should write the message header" do
-    @prot.write_message_begin('testMessage', Thrift::MessageTypes::CALL, 17)
+    @prot.write_message_begin("testMessage", Thrift::MessageTypes::CALL, 17)
     expect(@trans.read(@trans.available)).to eq([protocol_class.const_get(:VERSION_1) | Thrift::MessageTypes::CALL, "testMessage".size, "testMessage", 17].pack("NNa11N"))
   end
 
   it "should write the message header without version when writes are not strict" do
     @prot = protocol_class.new(@trans, true, false) # no strict write
-    @prot.write_message_begin('testMessage', Thrift::MessageTypes::CALL, 17)
+    @prot.write_message_begin("testMessage", Thrift::MessageTypes::CALL, 17)
     expect(@trans.read(@trans.available)).to eq("\000\000\000\vtestMessage\001\000\000\000\021")
   end
 
   it "should write the message header with a version when writes are strict" do
     @prot = protocol_class.new(@trans) # strict write
-    @prot.write_message_begin('testMessage', Thrift::MessageTypes::CALL, 17)
+    @prot.write_message_begin("testMessage", Thrift::MessageTypes::CALL, 17)
     expect(@trans.read(@trans.available)).to eq("\200\001\000\001\000\000\000\vtestMessage\000\000\000\021")
   end
-
 
   # message footer is a noop
 
   it "should write the field header" do
-    @prot.write_field_begin('foo', Thrift::Types::DOUBLE, 3)
+    @prot.write_field_begin("foo", Thrift::Types::DOUBLE, 3)
     expect(@trans.read(@trans.available)).to eq([Thrift::Types::DOUBLE, 3].pack("cn"))
   end
 
@@ -74,7 +74,7 @@ shared_examples_for 'a binary protocol' do
 
   it "should write the map header" do
     @prot.write_map_begin(Thrift::Types::STRING, Thrift::Types::LIST, 17)
-    expect(@trans.read(@trans.available)).to eq([Thrift::Types::STRING, Thrift::Types::LIST, 17].pack("ccN"));
+    expect(@trans.read(@trans.available)).to eq([Thrift::Types::STRING, Thrift::Types::LIST, 17].pack("ccN"))
   end
 
   # map footer is a noop
@@ -106,69 +106,96 @@ shared_examples_for 'a binary protocol' do
     # byte is small enough, let's check -128..127
     (-128..127).each do |i|
       @prot.write_byte(i)
-      expect(@trans.read(1)).to eq([i].pack('c'))
+      expect(@trans.read(1)).to eq([i].pack("c"))
     end
   end
 
-  it "should clip numbers out of signed range" do
-    (128..255).each do |i|
-      @prot.write_byte(i)
-      expect(@trans.read(1)).to eq([i].pack('c'))
+  it "should reject bytes outside the signed byte range" do
+    [-129, 128, 255, 2**65].each do |i|
+      expect { @prot.write_byte(i) }.to raise_error(RangeError)
     end
+    expect(@trans.available).to eq(0)
   end
 
-  it "errors out with a Bignum" do
-    expect { @prot.write_byte(2**65) }.to raise_error(RangeError)
+  it "should reject non-integer bytes" do
+    expect { @prot.write_byte(1.5) }.to raise_error(TypeError, "integer argument expected") do |error|
+      expect(error).to be_instance_of(TypeError)
+    end
+    expect(@trans.available).to eq(0)
   end
 
-  it "should error gracefully when trying to write a nil byte" do
-    expect { @prot.write_byte(nil) }.to raise_error(StandardError, 'nil argument not allowed!')
+  it "should reject a nil byte as a type error without writing" do
+    expect { @prot.write_byte(nil) }.to raise_error(TypeError, "integer argument expected") do |error|
+      expect(error).to be_instance_of(TypeError)
+    end
+    expect(@trans.available).to eq(0)
   end
 
   it "should write an i16" do
     # try a random scattering of values
     # include the signed i16 minimum/maximum
-    [-2**15, -1024, 17, 0, -10000, 1723, 2**15-1].each do |i|
+    [-2**15, -1024, 17, 0, -10000, 1723, (2**15) - 1].each do |i|
       @prot.write_i16(i)
     end
-    # and try something out of signed range, it should clip
-    @prot.write_i16(2**15 + 5)
 
-    expect(@trans.read(@trans.available)).to eq("\200\000\374\000\000\021\000\000\330\360\006\273\177\377\200\005")
-
-    # a Bignum should error
-    # lambda { @prot.write_i16(2**65) }.should raise_error(RangeError)
+    expect(@trans.read(@trans.available)).to eq("\200\000\374\000\000\021\000\000\330\360\006\273\177\377")
   end
 
-  it "should error gracefully when trying to write a nil i16" do
-    expect { @prot.write_i16(nil) }.to raise_error(StandardError, 'nil argument not allowed!')
+  it "should reject i16 values outside the signed i16 range" do
+    [-2**15 - 1, 2**15, 2**65].each do |i|
+      expect { @prot.write_i16(i) }.to raise_error(RangeError)
+    end
+    expect(@trans.available).to eq(0)
+  end
+
+  it "should reject non-integer i16 values" do
+    expect { @prot.write_i16(1.5) }.to raise_error(TypeError, "integer argument expected") do |error|
+      expect(error).to be_instance_of(TypeError)
+    end
+    expect(@trans.available).to eq(0)
+  end
+
+  it "should reject a nil i16 as a type error without writing" do
+    expect { @prot.write_i16(nil) }.to raise_error(TypeError, "integer argument expected") do |error|
+      expect(error).to be_instance_of(TypeError)
+    end
+    expect(@trans.available).to eq(0)
   end
 
   it "should write an i32" do
     # try a random scattering of values
     # include the signed i32 minimum/maximum
-    [-2**31, -123123, -2532, -3, 0, 2351235, 12331, 2**31-1].each do |i|
+    [-2**31, -123123, -2532, -3, 0, 2351235, 12331, (2**31) - 1].each do |i|
       @prot.write_i32(i)
     end
-    # try something out of signed range, it should clip
     expect(@trans.read(@trans.available)).to eq("\200\000\000\000" + "\377\376\037\r" + "\377\377\366\034" + "\377\377\377\375" + "\000\000\000\000" + "\000#\340\203" + "\000\0000+" + "\177\377\377\377")
-    [2 ** 31 + 5, 2 ** 65 + 5].each do |i|
+    [-2**31 - 1, 2**31, (2**65) + 5].each do |i|
       expect { @prot.write_i32(i) }.to raise_error(RangeError)
     end
   end
 
-  it "should error gracefully when trying to write a nil i32" do
-    expect { @prot.write_i32(nil) }.to raise_error(StandardError, 'nil argument not allowed!')
+  it "should reject non-integer i32 values" do
+    expect { @prot.write_i32(1.5) }.to raise_error(TypeError, "integer argument expected") do |error|
+      expect(error).to be_instance_of(TypeError)
+    end
+    expect(@trans.available).to eq(0)
+  end
+
+  it "should reject a nil i32 as a type error without writing" do
+    expect { @prot.write_i32(nil) }.to raise_error(TypeError, "integer argument expected") do |error|
+      expect(error).to be_instance_of(TypeError)
+    end
+    expect(@trans.available).to eq(0)
   end
 
   it "should write an i64" do
     # try a random scattering of values
     # try the signed i64 minimum/maximum
-    [-2**63, -12356123612323, -23512351, -234, 0, 1231, 2351236, 12361236213, 2**63-1].each do |i|
+    [-2**63, -12356123612323, -23512351, -234, 0, 1231, 2351236, 12361236213, (2**63) - 1].each do |i|
       @prot.write_i64(i)
     end
-    # try something out of signed range, it should clip
-    expect(@trans.read(@trans.available)).to eq(["\200\000\000\000\000\000\000\000",
+    expect(@trans.read(@trans.available)).to eq([
+      "\200\000\000\000\000\000\000\000",
       "\377\377\364\303\035\244+]",
       "\377\377\377\377\376\231:\341",
       "\377\377\377\377\377\377\377\026",
@@ -176,17 +203,72 @@ shared_examples_for 'a binary protocol' do
       "\000\000\000\000\000\000\004\317",
       "\000\000\000\000\000#\340\204",
       "\000\000\000\002\340\311~\365",
-      "\177\377\377\377\377\377\377\377"].join(""))
-    expect { @prot.write_i64(2 ** 65 + 5) }.to raise_error(RangeError)
+      "\177\377\377\377\377\377\377\377",
+    ].join(""))
+    [-2**63 - 1, 2**63, (2**65) + 5].each do |i|
+      expect { @prot.write_i64(i) }.to raise_error(RangeError)
+    end
   end
 
-  it "should error gracefully when trying to write a nil i64" do
-    expect { @prot.write_i64(nil) }.to raise_error(StandardError, 'nil argument not allowed!')
+  it "should reject non-integer i64 values" do
+    expect { @prot.write_i64(1.5) }.to raise_error(TypeError, "integer argument expected") do |error|
+      expect(error).to be_instance_of(TypeError)
+    end
+    expect(@trans.available).to eq(0)
+  end
+
+  it "should reject a nil i64 as a type error without writing" do
+    expect { @prot.write_i64(nil) }.to raise_error(TypeError, "integer argument expected") do |error|
+      expect(error).to be_instance_of(TypeError)
+    end
+    expect(@trans.available).to eq(0)
+  end
+
+  it "should validate field ids before writing" do
+    {nil => TypeError, 1.5 => TypeError, -2**15 - 1 => RangeError, 2**15 => RangeError}.each do |field_id, error_class|
+      expect {
+        @prot.write_field_begin("foo", Thrift::Types::DOUBLE, field_id)
+      }.to raise_error(error_class) do |error|
+        expect(error).to be_instance_of(error_class)
+      end
+      expect(@trans.available).to eq(0)
+    end
+  end
+
+  it "should validate message sequence ids before writing" do
+    [true, false].each do |strict_write|
+      {nil => TypeError, 1.5 => TypeError, -2**31 - 1 => RangeError, 2**31 => RangeError}.each do |sequence_id, error_class|
+        @prot = protocol_class.new(@trans, true, strict_write)
+        expect {
+          @prot.write_message_begin("testMessage", Thrift::MessageTypes::CALL, sequence_id)
+        }.to raise_error(error_class) do |error|
+          expect(error).to be_instance_of(error_class)
+        end
+        expect(@trans.available).to eq(0)
+      end
+    end
+  end
+
+  it "should validate container sizes before writing" do
+    writers = [
+      [:write_map_begin, [Thrift::Types::STRING, Thrift::Types::LIST]],
+      [:write_list_begin, [Thrift::Types::I16]],
+      [:write_set_begin, [Thrift::Types::I16]],
+    ]
+
+    writers.each do |method, arguments|
+      {nil => TypeError, 1.5 => TypeError, -1 => RangeError, 2**31 => RangeError}.each do |size, error_class|
+        expect { @prot.public_send(method, *arguments, size) }.to raise_error(error_class) do |error|
+          expect(error).to be_instance_of(error_class)
+        end
+        expect(@trans.available).to eq(0)
+      end
+    end
   end
 
   it "should write a double" do
     # try a random scattering of values, including min/max
-    values = [Float::MIN,-1231.15325, -123123.23, -23.23515123, 0, 12351.1325, 523.23, Float::MAX]
+    values = [Float::MIN, -1231.15325, -123123.23, -23.23515123, 0, 12351.1325, 523.23, Float::MAX]
     values.each do |f|
       @prot.write_double(f)
       expect(@trans.read(@trans.available)).to eq([f].pack("G"))
@@ -194,58 +276,80 @@ shared_examples_for 'a binary protocol' do
   end
 
   it "should error gracefully when trying to write a nil double" do
-    expect { @prot.write_double(nil) }.to raise_error(StandardError, 'nil argument not allowed!')
+    expect { @prot.write_double(nil) }.to raise_error(StandardError, "nil argument not allowed!")
   end
 
-  it 'should write a string' do
-    str = 'abc'
+  it "should write a string" do
+    str = "abc"
     @prot.write_string(str)
     a = @trans.read(@trans.available)
     expect(a.encoding).to eq(Encoding::BINARY)
-    expect(a.unpack('C*')).to eq([0x00, 0x00, 0x00, 0x03, 0x61, 0x62, 0x63])
+    expect(a.unpack("C*")).to eq([0x00, 0x00, 0x00, 0x03, 0x61, 0x62, 0x63])
   end
 
-  it 'should write a string with unicode characters' do
-    str = "abc \u20AC \u20AD".encode('UTF-8')
+  it "should write a string with unicode characters" do
+    str = "abc \u20AC \u20AD".encode("UTF-8")
     @prot.write_string(str)
     a = @trans.read(@trans.available)
     expect(a.encoding).to eq(Encoding::BINARY)
-    expect(a.unpack('C*')).to eq([0x00, 0x00, 0x00, 0x0B, 0x61, 0x62, 0x63, 0x20,
-                              0xE2, 0x82, 0xAC, 0x20, 0xE2, 0x82, 0xAD])
+    expect(a.unpack("C*")).to eq([
+      0x00, 0x00, 0x00, 0x0B, 0x61, 0x62, 0x63, 0x20,
+      0xE2, 0x82, 0xAC, 0x20, 0xE2, 0x82, 0xAD,
+    ])
   end
 
-  it 'should write should write a string with unicode characters and transcoding' do
-    str = "abc \u20AC".encode('ISO-8859-15')
+  it "should write should write a string with unicode characters and transcoding" do
+    str = "abc \u20AC".encode("ISO-8859-15")
     @prot.write_string(str)
     a = @trans.read(@trans.available)
     expect(a.encoding).to eq(Encoding::BINARY)
-    expect(a.unpack('C*')).to eq([0x00, 0x00, 0x00, 0x07, 0x61, 0x62, 0x63, 0x20, 0xE2, 0x82, 0xAC])
+    expect(a.unpack("C*")).to eq([0x00, 0x00, 0x00, 0x07, 0x61, 0x62, 0x63, 0x20, 0xE2, 0x82, 0xAC])
   end
 
-  it 'should write a binary string' do
-    buffer = [0, 1, 2, 3].pack('C*')
+  it "should write a binary string" do
+    buffer = [0, 1, 2, 3].pack("C*")
     @prot.write_binary(buffer)
     a = @trans.read(@trans.available)
     expect(a.encoding).to eq(Encoding::BINARY)
-    expect(a.unpack('C*')).to eq([0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x02, 0x03])
+    expect(a.unpack("C*")).to eq([0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x02, 0x03])
+  end
+
+  it "should skip strings as binary values" do
+    @prot.write_binary("value")
+    expect(@prot).to receive(:read_binary).and_call_original
+    expect(@prot).not_to receive(:read_string)
+
+    @prot.skip(Thrift::Types::STRING)
+
+    expect(@trans.available).to eq(0)
+  end
+
+  it "should write a frozen non-binary string without mutating the input" do
+    buffer = "abc \u20AC".encode("UTF-8").freeze
+    @prot.write_binary(buffer)
+    a = @trans.read(@trans.available)
+    expect(buffer.encoding).to eq(Encoding::UTF_8)
+    expect(buffer).to be_frozen
+    expect(a.encoding).to eq(Encoding::BINARY)
+    expect(a.unpack("C*")).to eq([0x00, 0x00, 0x00, 0x07, 0x61, 0x62, 0x63, 0x20, 0xE2, 0x82, 0xAC])
   end
 
   it "should error gracefully when trying to write a nil string" do
-    expect { @prot.write_string(nil) }.to raise_error(StandardError, 'nil argument not allowed!')
+    expect { @prot.write_string(nil) }.to raise_error(StandardError, "nil argument not allowed!")
   end
 
   it "should error gracefully when trying to write a nil binary" do
-    expect { @prot.write_binary(nil) }.to raise_error(StandardError, 'nil argument not allowed!')
+    expect { @prot.write_binary(nil) }.to raise_error(StandardError, "nil argument not allowed!")
   end
 
   it "should write a uuid" do
     @prot.write_uuid("00112233-4455-6677-8899-aabbccddeeff")
     a = @trans.read(@trans.available)
-    expect(a.unpack('C*')).to eq([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+    expect(a.unpack("C*")).to eq([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
   end
 
   it "should read a uuid" do
-    @trans.write([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff].pack('C*'))
+    @trans.write([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff].pack("C*"))
     uuid = @prot.read_uuid
     expect(uuid).to eq("00112233-4455-6677-8899-aabbccddeeff")
   end
@@ -256,13 +360,13 @@ shared_examples_for 'a binary protocol' do
 
   it "should write the message header without version when writes are not strict" do
     @prot = protocol_class.new(@trans, true, false) # no strict write
-    @prot.write_message_begin('testMessage', Thrift::MessageTypes::CALL, 17)
+    @prot.write_message_begin("testMessage", Thrift::MessageTypes::CALL, 17)
     expect(@trans.read(@trans.available)).to eq("\000\000\000\vtestMessage\001\000\000\000\021")
   end
 
   it "should write the message header with a version when writes are strict" do
     @prot = protocol_class.new(@trans) # strict write
-    @prot.write_message_begin('testMessage', Thrift::MessageTypes::CALL, 17)
+    @prot.write_message_begin("testMessage", Thrift::MessageTypes::CALL, 17)
     expect(@trans.read(@trans.available)).to eq("\200\001\000\001\000\000\000\vtestMessage\000\000\000\021")
   end
 
@@ -276,13 +380,20 @@ shared_examples_for 'a binary protocol' do
   # field footer is a noop
 
   it "should read a stop field" do
-    @trans.write([Thrift::Types::STOP].pack("c"));
+    @trans.write([Thrift::Types::STOP].pack("c"))
     expect(@prot.read_field_begin).to eq([nil, Thrift::Types::STOP, 0])
   end
 
   it "should read a map header" do
     @trans.write([Thrift::Types::DOUBLE, Thrift::Types::I64, 42].pack("ccN"))
     expect(@prot.read_map_begin).to eq([Thrift::Types::DOUBLE, Thrift::Types::I64, 42])
+  end
+
+  it "should reject a negative map size" do
+    @trans.write([Thrift::Types::DOUBLE, Thrift::Types::I64, 0xffffffff].pack("ccN"))
+    expect { @prot.read_map_begin }.to raise_error(Thrift::ProtocolException, "Negative size") do |e|
+      expect(e.type).to eq(Thrift::ProtocolException::NEGATIVE_SIZE)
+    end
   end
 
   # map footer is a noop
@@ -292,6 +403,13 @@ shared_examples_for 'a binary protocol' do
     expect(@prot.read_list_begin).to eq([Thrift::Types::STRING, 17])
   end
 
+  it "should reject a negative list size" do
+    @trans.write([Thrift::Types::STRING, 0xffffffff].pack("cN"))
+    expect { @prot.read_list_begin }.to raise_error(Thrift::ProtocolException, "Negative size") do |e|
+      expect(e.type).to eq(Thrift::ProtocolException::NEGATIVE_SIZE)
+    end
+  end
+
   # list footer is a noop
 
   it "should read a set header" do
@@ -299,10 +417,17 @@ shared_examples_for 'a binary protocol' do
     expect(@prot.read_set_begin).to eq([Thrift::Types::STRING, 17])
   end
 
+  it "should reject a negative set size" do
+    @trans.write([Thrift::Types::STRING, 0xffffffff].pack("cN"))
+    expect { @prot.read_set_begin }.to raise_error(Thrift::ProtocolException, "Negative size") do |e|
+      expect(e.type).to eq(Thrift::ProtocolException::NEGATIVE_SIZE)
+    end
+  end
+
   # set footer is a noop
 
   it "should read a bool" do
-    @trans.write("\001\000");
+    @trans.write("\001\000")
     expect(@prot.read_bool).to eq(true)
     expect(@prot.read_bool).to eq(false)
   end
@@ -316,15 +441,15 @@ shared_examples_for 'a binary protocol' do
 
   it "should read an i16" do
     # try a scattering of values, including min/max
-    [-2**15, -5237, -353, 0, 1527, 2234, 2**15-1].each do |i|
-      @trans.write([i].pack("n"));
+    [-2**15, -5237, -353, 0, 1527, 2234, (2**15) - 1].each do |i|
+      @trans.write([i].pack("n"))
       expect(@prot.read_i16).to eq(i)
     end
   end
 
   it "should read an i32" do
     # try a scattering of values, including min/max
-    [-2**31, -235125, -6236, 0, 2351, 123123, 2**31-1].each do |i|
+    [-2**31, -235125, -6236, 0, 2351, 123123, (2**31) - 1].each do |i|
       @trans.write([i].pack("N"))
       expect(@prot.read_i32).to eq(i)
     end
@@ -332,69 +457,98 @@ shared_examples_for 'a binary protocol' do
 
   it "should read an i64" do
     # try a scattering of values, including min/max
-    [-2**63, -123512312, -6346, 0, 32, 2346322323, 2**63-1].each do |i|
+    [-2**63, -123512312, -6346, 0, 32, 2346322323, (2**63) - 1].each do |i|
       @trans.write([i >> 32, i & 0xFFFFFFFF].pack("NN"))
       expect(@prot.read_i64).to eq(i)
+    end
+  end
+
+  it "should decode fixed-width signed edge byte patterns" do
+    {
+      read_i16: {
+        [0x80, 0x00] => -(2**15),
+        [0xff, 0xff] => -1,
+      },
+      read_i32: {
+        [0x80, 0x00, 0x00, 0x00] => -(2**31),
+        [0xff, 0xff, 0xff, 0xff] => -1,
+      },
+      read_i64: {
+        [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00] => -(2**63),
+        [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff] => -1,
+      },
+    }.each do |reader, cases|
+      cases.each do |bytes, expected|
+        @trans.write(bytes.pack("C*"))
+        expect(@prot.public_send(reader)).to eq(expected)
+      end
     end
   end
 
   it "should read a double" do
     # try a random scattering of values, including min/max
     [Float::MIN, -231231.12351, -323.233513, 0, 123.2351235, 2351235.12351235, Float::MAX].each do |f|
-      @trans.write([f].pack("G"));
+      @trans.write([f].pack("G"))
       expect(@prot.read_double).to eq(f)
     end
   end
 
-  it 'should read a string' do
+  it "should read a string" do
     # i32 of value 3, followed by three characters/UTF-8 bytes 'a', 'b', 'c'
-    buffer = [0x00, 0x00, 0x00, 0x03, 0x61, 0x62, 0x63].pack('C*')
+    buffer = [0x00, 0x00, 0x00, 0x03, 0x61, 0x62, 0x63].pack("C*")
     @trans.write(buffer)
     a = @prot.read_string
-    expect(a).to eq('abc'.encode('UTF-8'))
+    expect(a).to eq("abc".encode("UTF-8"))
     expect(a.encoding).to eq(Encoding::UTF_8)
   end
 
-  it 'should read a string containing unicode characters from UTF-8 encoded buffer' do
+  it "should read a string containing unicode characters from UTF-8 encoded buffer" do
     # i32 of value 3, followed by one character U+20AC made up of three bytes
-    buffer = [0x00, 0x00, 0x00, 0x03, 0xE2, 0x82, 0xAC].pack('C*')
+    buffer = [0x00, 0x00, 0x00, 0x03, 0xE2, 0x82, 0xAC].pack("C*")
     @trans.write(buffer)
     a = @prot.read_string
-    expect(a).to eq("\u20AC".encode('UTF-8'))
+    expect(a).to eq("\u20AC".encode("UTF-8"))
     expect(a.encoding).to eq(Encoding::UTF_8)
   end
 
-  it 'should read a binary string' do
-    buffer = [0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x02, 0x03].pack('C*')
+  it "should read a binary string" do
+    buffer = [0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x02, 0x03].pack("C*")
     @trans.write(buffer)
     a = @prot.read_binary
-    expect(a).to eq([0x00, 0x01, 0x02, 0x03].pack('C*'))
+    expect(a).to eq([0x00, 0x01, 0x02, 0x03].pack("C*"))
     expect(a.encoding).to eq(Encoding::BINARY)
+  end
+
+  it "should reject a negative binary size" do
+    @trans.write([0xff, 0xff, 0xff, 0xff].pack("C*"))
+    expect { @prot.read_binary }.to raise_error(Thrift::ProtocolException, "Negative size") do |e|
+      expect(e.type).to eq(Thrift::ProtocolException::NEGATIVE_SIZE)
+    end
   end
 
   it "should perform a complete rpc with no args or return" do
     srv_test(
-      proc {|client| client.send_voidMethod()},
-      proc {|client| expect(client.recv_voidMethod).to eq(nil)}
+      proc { |client| client.send_voidMethod },
+      proc { |client| expect(client.recv_voidMethod).to eq(nil) },
     )
   end
 
   it "should perform a complete rpc with a primitive return type" do
     srv_test(
-      proc {|client| client.send_primitiveMethod()},
-      proc {|client| expect(client.recv_primitiveMethod).to eq(1)}
+      proc { |client| client.send_primitiveMethod },
+      proc { |client| expect(client.recv_primitiveMethod).to eq(1) },
     )
   end
 
   it "should perform a complete rpc with a struct return type" do
     srv_test(
-      proc {|client| client.send_structMethod()},
-      proc {|client|
+      proc { |client| client.send_structMethod },
+      proc { |client|
         result = client.recv_structMethod
         result.set_byte_map = nil
         result.map_byte_map = nil
         expect(result).to eq(Fixtures::COMPACT_PROTOCOL_TEST_STRUCT)
-      }
+      },
     )
   end
 
@@ -432,7 +586,7 @@ shared_examples_for 'a binary protocol' do
   end
 
   class SrvHandler
-    def voidMethod()
+    def voidMethod
     end
 
     def primitiveMethod

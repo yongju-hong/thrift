@@ -24,52 +24,41 @@
  * @package thrift.classloader
  */
 
+declare(strict_types=1);
+
 namespace Thrift\ClassLoader;
 
 class ThriftClassLoader
 {
     /**
      * Namespaces path
-     * @var array
+     *
+     * @var array<string, list<string>>
      */
-    protected $namespaces = array();
+    protected array $namespaces = [];
 
     /**
      * Thrift definition paths
-     * @var array
+     *
+     * @var array<string, list<string>>
      */
-    protected $definitions = array();
-
-    /**
-     * Do we use APCu cache ?
-     * @var boolean
-     */
-    protected $apcu = false;
-
-    /**
-     * APCu Cache prefix
-     * @var string
-     */
-    protected $apcu_prefix;
+    protected array $definitions = [];
 
     /**
      * Set autoloader to use APCu cache
-     * @param boolean $apc
-     * @param string $apcu_prefix
      */
-    public function __construct($apc = false, $apcu_prefix = null)
-    {
-        $this->apcu = $apc;
-        $this->apcu_prefix = $apcu_prefix;
+    public function __construct(
+        protected bool $apcu = false,
+        protected ?string $apcu_prefix = null,
+    ) {
     }
 
     /**
      * Registers a namespace.
      *
-     * @param string $namespace The namespace
-     * @param array|string $paths The location(s) of the namespace
+     * @param string|list<string> $paths The location(s) of the namespace
      */
-    public function registerNamespace($namespace, $paths)
+    public function registerNamespace(string $namespace, string|array $paths): void
     {
         $this->namespaces[$namespace] = (array)$paths;
     }
@@ -77,57 +66,52 @@ class ThriftClassLoader
     /**
      * Registers a Thrift definition namespace.
      *
-     * @param string $namespace The definition namespace
-     * @param array|string $paths The location(s) of the definition namespace
+     * @param string|list<string> $paths The location(s) of the definition namespace
      */
-    public function registerDefinition($namespace, $paths)
+    public function registerDefinition(string $namespace, string|array $paths): void
     {
         $this->definitions[$namespace] = (array)$paths;
     }
 
     /**
      * Registers this instance as an autoloader.
-     *
-     * @param Boolean $prepend Whether to prepend the autoloader or not
      */
-    public function register($prepend = false)
+    public function register(bool $prepend = false): void
     {
-        spl_autoload_register(array($this, 'loadClass'), true, $prepend);
+        spl_autoload_register([$this, 'loadClass'], true, $prepend);
     }
 
     /**
      * Loads the given class, definition or interface.
-     *
-     * @param string $class The name of the class
      */
-    public function loadClass($class)
+    public function loadClass(string $class): void
     {
-        if ((true === $this->apcu && ($file = $this->findFileInApcu($class)))
-            || ($file = $this->findFile($class))) {
+        if (
+            (true === $this->apcu && ($file = $this->findFileInApcu($class)))
+            || ($file = $this->findFile($class))
+        ) {
             require_once $file;
         }
     }
 
     /**
      * Loads the given class or interface in APCu.
-     * @param  string $class The name of the class
-     * @return string
      */
-    protected function findFileInApcu($class)
+    protected function findFileInApcu(string $class): ?string
     {
-        if (false === $file = apcu_fetch($this->apcu_prefix . $class)) {
-            apcu_store($this->apcu_prefix . $class, $file = $this->findFile($class));
+        $file = apcu_fetch($this->apcu_prefix . $class);
+        if ($file === false) {
+            $file = $this->findFile($class);
+            apcu_store($this->apcu_prefix . $class, $file);
         }
 
-        return $file;
+        return is_string($file) ? $file : null;
     }
 
     /**
      * Find class in namespaces or definitions directories
-     * @param  string $class
-     * @return string
      */
-    public function findFile($class)
+    public function findFile(string $class): ?string
     {
         // Remove first backslash
         if ('\\' == $class[0]) {
@@ -166,8 +150,7 @@ class ThriftClassLoader
 
             // Ignore wrong call
             if (count($m) <= 1) {
-                #HOW TO TEST THIS? HOW TEST CASE SHOULD LOOK LIKE?
-                return;
+                return null;
             }
 
             $class = array_pop($m);
@@ -184,8 +167,10 @@ class ThriftClassLoader
                      * Available in service: Interface, Client, Processor, Rest
                      * And every service methods (_.+)
                      */
-                    if (0 === preg_match('#(.+)(if|client|processor|rest)$#i', $class, $n)
-                        && 0 === preg_match('#(.+)_[a-z0-9]+_(args|result)$#i', $class, $n)) {
+                    if (
+                        0 === preg_match('#(.+)(if|client|processor|rest)$#i', $class, $n)
+                        && 0 === preg_match('#(.+)_[a-z0-9]+_(args|result)$#i', $class, $n)
+                    ) {
                         $className = 'Types';
                     } else {
                         $className = $n[1];
@@ -202,5 +187,7 @@ class ThriftClassLoader
                 }
             }
         }
+
+        return null;
     }
 }

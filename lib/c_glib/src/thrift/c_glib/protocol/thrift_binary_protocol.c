@@ -449,6 +449,66 @@ thrift_binary_protocol_read_message_begin (ThriftProtocol *protocol,
     }
     xfer += ret;
   }
+  else
+  {
+    /* Non-versioned (old-style) message: the leading int32 is the method
+       name length, followed by the message type (1 byte) and the sequence
+       id (int32). The other language bindings implement this branch; c_glib
+       omitted it, which left *name, *message_type and *seqid unset for the
+       caller. Mirror the bounds checks that
+       thrift_binary_protocol_read_string() applies so the name allocation
+       stays within the configured limits. */
+    ThriftBinaryProtocol *bp = THRIFT_BINARY_PROTOCOL (protocol);
+    ThriftTransportClass *ttc =
+        THRIFT_TRANSPORT_GET_CLASS (protocol->transport);
+    gint8 type;
+
+    if (bp->string_limit > 0 && sz > bp->string_limit)
+    {
+      g_set_error (error, THRIFT_PROTOCOL_ERROR,
+                   THRIFT_PROTOCOL_ERROR_SIZE_LIMIT,
+                   "got size over limit (%d > %d)", sz, bp->string_limit);
+      *name = NULL;
+      return -1;
+    }
+
+    if (!ttc->checkReadBytesAvailable (THRIFT_TRANSPORT (protocol->transport),
+                                       sz, error))
+    {
+      *name = NULL;
+      return -1;
+    }
+
+    *name = g_new0 (gchar, (guint32) sz + 1);
+    if (sz > 0)
+    {
+      if ((ret = thrift_transport_read_all (protocol->transport,
+                                            *name, sz, error)) < 0)
+      {
+        g_free (*name);
+        *name = NULL;
+        return -1;
+      }
+      xfer += ret;
+    }
+
+    if ((ret = thrift_protocol_read_byte (protocol, &type, error)) < 0)
+    {
+      g_free (*name);
+      *name = NULL;
+      return -1;
+    }
+    *message_type = (ThriftMessageType) type;
+    xfer += ret;
+
+    if ((ret = thrift_protocol_read_i32 (protocol, seqid, error)) < 0)
+    {
+      g_free (*name);
+      *name = NULL;
+      return -1;
+    }
+    xfer += ret;
+  }
   return xfer;
 }
 
@@ -577,9 +637,9 @@ thrift_binary_protocol_read_map_begin (ThriftProtocol *protocol,
     return -1;
   }
 
-  if(!ttc->checkReadBytesAvailable (THRIFT_TRANSPORT(tp->transport), 
-                                    sizei * thrift_binary_protocol_get_min_serialized_size(protocol, k, error) + 
-                                    sizei * thrift_binary_protocol_get_min_serialized_size(protocol, v, error),
+  if(!ttc->checkReadBytesAvailable (THRIFT_TRANSPORT(tp->transport),
+                                    (gint64) sizei * thrift_binary_protocol_get_min_serialized_size(protocol, k, error) +
+                                    (gint64) sizei * thrift_binary_protocol_get_min_serialized_size(protocol, v, error),
                                     error))
   {
     return -1;
@@ -642,8 +702,8 @@ thrift_binary_protocol_read_list_begin (ThriftProtocol *protocol,
     return -1;
   }
 
-  if(!ttc->checkReadBytesAvailable (THRIFT_TRANSPORT(tp->transport), 
-                                    (sizei * thrift_binary_protocol_get_min_serialized_size(protocol, e, error)),
+  if(!ttc->checkReadBytesAvailable (THRIFT_TRANSPORT(tp->transport),
+                                    ((gint64) sizei * thrift_binary_protocol_get_min_serialized_size(protocol, e, error)),
                                     error))
   {
     return -1;

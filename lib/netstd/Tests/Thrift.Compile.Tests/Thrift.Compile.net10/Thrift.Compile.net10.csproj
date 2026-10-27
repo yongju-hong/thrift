@@ -19,7 +19,7 @@
   -->
 
   <PropertyGroup>
-    <ThriftVersion>0.23.0</ThriftVersion>
+    <ThriftVersion>0.26.0</ThriftVersion>
     <ThriftVersionOutput>Thrift version $(ThriftVersion)</ThriftVersionOutput>
     <TargetFramework>net10.0</TargetFramework>
     <LangVersion>latestMajor</LangVersion>
@@ -38,7 +38,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.ServiceModel.Primitives" Version="10.0.652802" />
+    <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.13" />
+    <PackageReference Include="System.ServiceModel.Primitives" Version="10.1.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -77,11 +78,14 @@
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net10 -r ../name_conflicts.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net10 -r ../../../../../test/ThriftTest.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net10 -r ../../../../../test/ExceptionStruct.thrift" />
+    <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net10 -r ../../../../../test/Recursive.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net10 -r ../../../../../contrib/fb303/if/fb303.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net10 -r ../Thrift5253.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net10 -r ../Thrift5320.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net10 -r ../Thrift5382.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net10 -r ../Thrift5795.thrift" />
+    <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net10 -r ../Thrift6198.thrift" />
+    <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net10 -r ../Thrift6199.thrift" />
     <!-- special options (see ticket) -->
     <Exec Command="$(PathToThrift) -gen netstd:net10                  -r ../Thrift5794.thrift" />
   </Target>

@@ -26,15 +26,11 @@ THRIFTTEST = $(top_srcdir)/test/ThriftTest.thrift
 
 precross: bin/testclient bin/testserver
 
-ThriftTest.thrift: $(THRIFTTEST)
-	grep -v list.*map.*list.*map $(THRIFTTEST) > ThriftTest.thrift
-
 .PHONY: gopath
 
-# Thrift for GO has problems with complex map keys: THRIFT-2063
-gopath: $(THRIFT) ThriftTest.thrift
+gopath: $(THRIFT) $(THRIFTTEST)
 	mkdir -p src/gen
-	$(THRIFTCMD) ThriftTest.thrift
+	$(THRIFTCMD) $(THRIFTTEST)
 	$(THRIFTCMD) ../StressTest.thrift
 	$(THRIFTCMD) ../ConstantsDemo.thrift
 	touch gopath
@@ -49,7 +45,7 @@ bin/stress: gopath
 	$(GO) build $(GOBUILDEXTRA) -o bin/stress ./src/bin/stress
 
 clean-local:
-	$(RM) -r src/gen src/github.com/golang src/thrift bin pkg gopath ThriftTest.thrift
+	$(RM) -r src/gen src/github.com/golang src/thrift bin pkg gopath
 
 check_PROGRAMS: bin/testclient bin/testserver bin/stress
 

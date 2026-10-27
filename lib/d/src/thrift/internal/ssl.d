@@ -30,13 +30,21 @@ import std.conv : to;
 import std.socket : Address;
 import thrift.transport.ssl;
 
+version (use_openssl_3) {
+  // OpenSSL 3.0 renamed SSL_get_peer_certificate to SSL_get1_peer_certificate
+  // and left the old name only as a header macro, so it is no longer an
+  // exported symbol the pinned deimos bindings can reach. Declare the current
+  // name here until those bindings carry it.
+  private extern (C) X509* SSL_get1_peer_certificate(const(SSL)* ssl);
+}
+
 /**
  * Checks if the peer is authorized after the SSL handshake has been
- * completed on the given conncetion and throws an TSSLException if not.
+ * completed on the given connection and throws an TSSLException if not.
  *
  * Params:
  *   ssl = The SSL connection to check.
- *   accessManager = The access manager to check the peer againts.
+ *   accessManager = The access manager to check the peer against.
  *   peerAddress = The (IP) address of the peer.
  *   hostName = The host name of the peer.
  */
@@ -51,7 +59,11 @@ void authorize(SSL* ssl, TAccessManager accessManager,
       to!string(X509_verify_cert_error_string(rc)));
   }
 
-  auto cert = SSL_get_peer_certificate(ssl);
+  version (use_openssl_3) {
+    auto cert = SSL_get1_peer_certificate(ssl);
+  } else {
+    auto cert = SSL_get_peer_certificate(ssl);
+  }
   if (cert is null) {
     // Certificate is not present.
     if (SSL_get_verify_mode(ssl) & SSL_VERIFY_FAIL_IF_NO_PEER_CERT) {
@@ -96,12 +108,21 @@ void authorize(SSL* ssl, TAccessManager accessManager,
   } else version(use_openssl_1_1_x) {
     enum _GEN_DNS = GEN_DNS;
     enum _GEN_IPADD = GEN_IPADD;
+  } else version(use_openssl_3) {
+    enum _GEN_DNS = GENERAL_NAME.GEN_DNS;
+    enum _GEN_IPADD = GENERAL_NAME.GEN_IPADD;
   } else {
-    static assert(false, `Must have version either use_openssl_1_0_x or use_openssl_1_1_x defined, e.g.
+    static assert(false, `Must have version use_openssl_1_0_x, use_openssl_1_1_x or use_openssl_3 defined, e.g.
 	"subConfigurations": {
-		"apache-thrift": "use_openssl_1_0"
+		"apache-thrift": "use_openssl_3"
 	}`);
   }
+
+  // Whether the certificate carried a dNSName at all, tracked separately from
+  // whether one matched: RFC 6125 6.4.4 and RFC 9525 6.3 make the
+  // subjectAltName the identity once it is present, so the commonName below is
+  // for certificates that carry none.
+  bool hasDnsName;
 
   if (alternatives != null) {
     auto count = sk_GENERAL_NAME_num(alternatives);
@@ -115,6 +136,7 @@ void authorize(SSL* ssl, TAccessManager accessManager,
 
       switch (name.type) {
         case _GEN_DNS:
+          hasDnsName = true;
           decision = accessManager.verify(hostName, cast(char[])data[0 .. length]);
           break;
         case _GEN_IPADD:
@@ -129,7 +151,7 @@ void authorize(SSL* ssl, TAccessManager accessManager,
     sk_GENERAL_NAME_pop_free!()(alternatives, &GENERAL_NAME_free);
   }
 
-  // If we are alredy done, return.
+  // If we are already done, return.
   if (decision != Decision.SKIP) {
     X509_free(cert);
     if (decision != Decision.ALLOW) {
@@ -138,11 +160,11 @@ void authorize(SSL* ssl, TAccessManager accessManager,
     return;
   }
 
-  // Check commonName.
-  auto name = X509_get_subject_name(cert);
+  // Check commonName -- but only for a certificate that presented no dNSName.
+  // A dNSName that did not match is an answer, not an absence.
+  auto name = hasDnsName ? null : X509_get_subject_name(cert);
   if (name !is null) {
     X509_NAME_ENTRY* entry;
-    char* utf8;
     int last = -1;
     while (decision == Decision.SKIP) {
       last = X509_NAME_get_index_by_NID(name, NID_commonName, last);
@@ -152,7 +174,14 @@ void authorize(SSL* ssl, TAccessManager accessManager,
       if (entry is null)
         continue;
       auto common = X509_NAME_ENTRY_get_data(entry);
+      // ASN1_STRING_to_UTF8() leaves the output pointer untouched and returns a
+      // negative length for a commonName whose string type it cannot convert, so
+      // the pointer is scoped to the iteration and the result is checked before
+      // the name is sliced or released.
+      char* utf8;
       auto size = ASN1_STRING_to_UTF8(&utf8, common);
+      if (size < 0)
+        continue;
       decision = accessManager.verify(hostName, utf8[0 .. size]);
       CRYPTO_free(utf8);
     }
@@ -161,6 +190,25 @@ void authorize(SSL* ssl, TAccessManager accessManager,
   if (decision != Decision.ALLOW) {
     throw new TSSLException("Authorize: Could not authorize peer.");
   }
+}
+
+// ASN1_STRING_to_UTF8() reports a negative length and leaves its output pointer
+// untouched for a string whose type it cannot convert. The commonName fallback
+// in authorize() above relies on that: the pointer is scoped to each iteration
+// and the result checked before the name is sliced or released, so an entry
+// that does not convert is skipped rather than acted on.
+unittest {
+  import deimos.openssl.asn1;
+
+  auto common = ASN1_STRING_type_new(V_ASN1_OBJECT_DESCRIPTOR);
+  scope(exit) ASN1_STRING_free(common);
+  static immutable ubyte[4] raw = [1, 2, 3, 4];
+  ASN1_STRING_set(common, raw.ptr, cast(int) raw.length);
+
+  char* utf8;
+  auto size = ASN1_STRING_to_UTF8(&utf8, common);
+  assert(size < 0, "an unconvertible commonName string type must report failure");
+  assert(utf8 is null, "the output pointer must be left untouched on failure");
 }
 
 /*
@@ -188,7 +236,7 @@ Exception getSSLException(string location = null, string clientFile = __FILE__,
   // OpenSSL error. Because there can possibly be more than one error on the
   // error stack, we have to fetch all of them, and pick the last, i.e. newest
   // one. We concatenate multiple successive OpenSSL error messages into a
-  // single one, but always just return the last D expcetion.
+  // single one, but always just return the last D exception.
   string message; // Probably better use an Appender here.
   bool hadMessage;
   Exception exception;

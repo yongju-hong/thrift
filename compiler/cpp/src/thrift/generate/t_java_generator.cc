@@ -148,6 +148,7 @@ public:
   void init_generator() override;
   void close_generator() override;
   std::string display_name() const override;
+  std::string get_doc_type_name(t_type* type) override;
 
   void generate_consts(std::vector<t_const*> consts) override;
 
@@ -216,6 +217,7 @@ public:
   std::string generate_isset_check(t_field* field);
   std::string generate_isset_check(std::string field);
   void generate_isset_set(ostream& out, t_field* field, std::string prefix);
+  void generate_isset_set_in_constructor(ostream& out, t_struct* tstruct, t_field* field);
   std::string isset_field_id(t_field* field);
 
   void generate_service_interface(t_service* tservice);
@@ -1697,7 +1699,7 @@ void t_java_generator::generate_java_struct_definition(ostream& out,
                       << make_valid_java_identifier((*m_iter)->get_name()) << ";"
                       << '\n';
         }
-        generate_isset_set(out, (*m_iter), "");
+        generate_isset_set_in_constructor(out, tstruct, *m_iter);
       }
     }
 
@@ -2615,8 +2617,10 @@ void t_java_generator::generate_java_bean_boilerplate(ostream& out, t_struct* ts
         indent(out) << "@Deprecated" << '\n';
       }
       indent(out) << "public byte[] get" << cap_name << "() {" << '\n';
-      indent(out) << "  set" << cap_name << "(org.apache.thrift.TBaseHelper.rightSize("
-                  << field_name << "));" << '\n';
+      // Assign the right-sized buffer directly: going through the setter would copy it again
+      // (copyBinary) on every call, although the returned array is the field's own either way.
+      indent(out) << "  this." << field_name << " = org.apache.thrift.TBaseHelper.rightSize("
+                  << field_name << ");" << '\n';
       indent(out) << "  return " << field_name << " == null ? null : " << field_name << ".array();"
                   << '\n';
       indent(out) << "}" << '\n' << '\n';
@@ -4275,8 +4279,8 @@ void t_java_generator::generate_deserialize_container(ostream& out,
     // TreeSet and TreeMap don't have any constructor which takes a capacity as an argument
     out << "();" << '\n';
   } else {
-    out << "(" << (ttype->is_list() ? "" : "2*") << obj << ".size"
-        << ");" << '\n';
+    out << "(org.apache.thrift.TBaseHelper.preallocSize(" << (ttype->is_list() ? "" : "2*") << obj
+        << ".size));" << '\n';
   }
 
   if (reuse_objects_) {
@@ -4690,6 +4694,10 @@ string t_java_generator::type_name(t_type* ttype,
   }
 
   return make_valid_java_identifier(ttype->get_name());
+}
+
+std::string t_java_generator::get_doc_type_name(t_type* type) {
+  return type_name(type, false, false, false, true);
 }
 
 /**
@@ -5252,6 +5260,30 @@ void t_java_generator::generate_isset_set(ostream& out, t_field* field, string p
   if (!type_can_be_null(field->get_type())) {
     indent(out) << prefix << "set" << get_cap_name(field->get_name()) << get_cap_name("isSet")
                 << "(true);" << '\n';
+  }
+}
+
+/**
+ * Marks a field as set from a constructor. Calling the public, overridable setXIsSet() there
+ * lets 'this' escape before a subclass is initialized (javac's this-escape lint), so the bit is
+ * set directly, the way that method does it.
+ */
+void t_java_generator::generate_isset_set_in_constructor(ostream& out,
+                                                         t_struct* tstruct,
+                                                         t_field* field) {
+  if (type_can_be_null(field->get_type())) {
+    return;
+  }
+  switch (needs_isset(tstruct)) {
+  case ISSET_PRIMITIVE:
+    indent(out) << "__isset_bitfield = org.apache.thrift.EncodingUtils.setBit(__isset_bitfield, "
+                << isset_field_id(field) << ", true);" << '\n';
+    break;
+  case ISSET_BITSET:
+    indent(out) << "__isset_bit_vector.set(" << isset_field_id(field) << ", true);" << '\n';
+    break;
+  case ISSET_NONE:
+    break;
   }
 }
 

@@ -16,9 +16,9 @@
 // under the License.
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use integer_encoding::{VarIntReader, VarIntWriter};
 use std::convert::{From, TryFrom};
-use std::io;
+use std::io::{self, Cursor};
+use varint_rs::VarintWriter;
 
 use super::{
     TFieldIdentifier, TInputProtocol, TInputProtocolFactory, TListIdentifier, TMapIdentifier,
@@ -31,6 +31,9 @@ use crate::{ProtocolError, ProtocolErrorKind, TConfiguration};
 const COMPACT_PROTOCOL_ID: u8 = 0x82;
 const COMPACT_VERSION: u8 = 0x01;
 const COMPACT_VERSION_MASK: u8 = 0x1F;
+const MAX_VARINT16_BYTES: usize = 3; // ceil(16/7); matches protobuf wire format
+const MAX_VARINT32_BYTES: usize = 5; // ceil(32/7); matches protobuf wire format
+const MAX_VARINT64_BYTES: usize = 10; // ceil(64/7); matches protobuf wire format
 
 /// Read messages encoded in the Thrift compact protocol.
 ///
@@ -101,7 +104,7 @@ where
             // high bits set high if count and type encoded separately
             possible_element_count as i32
         } else {
-            self.transport.read_varint::<u32>()? as i32
+            self.read_varint32()? as i32
         };
 
         let min_element_size = self.min_serialized_size(element_type);
@@ -121,6 +124,58 @@ where
         }
         Ok(())
     }
+
+    fn read_varint32(&mut self) -> crate::Result<u32> {
+        let mut result = 0u32;
+        let mut shift = 0u32;
+        for _ in 0..MAX_VARINT32_BYTES {
+            let b = self.read_byte()?;
+            result |= ((b & 0x7F) as u32) << shift;
+            if b & 0x80 == 0 {
+                return Ok(result);
+            }
+            shift += 7;
+        }
+        Err(crate::Error::Protocol(ProtocolError::new(
+            ProtocolErrorKind::InvalidData,
+            "Variable-length int over 5 bytes.",
+        )))
+    }
+
+    fn read_varint64(&mut self) -> crate::Result<u64> {
+        let mut result = 0u64;
+        let mut shift = 0u32;
+        for _ in 0..MAX_VARINT64_BYTES {
+            let b = self.read_byte()?;
+            result |= ((b & 0x7F) as u64) << shift;
+            if b & 0x80 == 0 {
+                return Ok(result);
+            }
+            shift += 7;
+        }
+        Err(crate::Error::Protocol(ProtocolError::new(
+            ProtocolErrorKind::InvalidData,
+            "Variable-length int over 10 bytes.",
+        )))
+    }
+
+    fn read_binary_len(&mut self) -> crate::Result<usize> {
+        let len = self.read_varint32()?;
+
+        if let Some(max_size) = self.config.max_string_size() {
+            if len as usize > max_size {
+                return Err(crate::Error::Protocol(ProtocolError::new(
+                    ProtocolErrorKind::SizeLimit,
+                    format!(
+                        "Byte array size {} exceeds maximum allowed size of {}",
+                        len, max_size
+                    ),
+                )));
+            }
+        }
+
+        Ok(len as usize)
+    }
 }
 
 impl<T> TInputProtocol for TCompactInputProtocol<T>
@@ -128,7 +183,8 @@ where
     T: TReadTransport,
 {
     fn read_message_begin(&mut self) -> crate::Result<TMessageIdentifier> {
-        // TODO: Once specialization is stable, call the message size tracking here
+        // TODO: start the per-message byte count here once a transport can keep
+        // one; see check_container_size in protocol/mod.rs.
         let compact_id = self.read_byte()?;
         if compact_id != COMPACT_PROTOCOL_ID {
             Err(crate::Error::Protocol(crate::ProtocolError {
@@ -156,7 +212,7 @@ where
         // NOTE: unsigned right shift will pad with 0s
         let message_type: TMessageType = TMessageType::try_from(type_and_byte >> 5)?;
         // writing side wrote signed sequence number as u32 to avoid zigzag encoding
-        let sequence_number = self.transport.read_varint::<u32>()? as i32;
+        let sequence_number = self.read_varint32()? as i32;
         let service_call_name = self.read_string()?;
 
         self.last_read_field_id = 0;
@@ -217,7 +273,15 @@ where
             ),
             _ => {
                 if field_delta != 0 {
-                    self.last_read_field_id += field_delta as i16;
+                    self.last_read_field_id = self
+                        .last_read_field_id
+                        .checked_add(field_delta as i16)
+                        .ok_or_else(|| {
+                            crate::Error::Protocol(ProtocolError::new(
+                                ProtocolErrorKind::InvalidData,
+                                "field id overflow",
+                            ))
+                        })?;
                 } else {
                     self.last_read_field_id = self.read_i16()?;
                 };
@@ -257,25 +321,17 @@ where
     }
 
     fn read_bytes(&mut self) -> crate::Result<Vec<u8>> {
-        let len = self.transport.read_varint::<u32>()?;
-
-        if let Some(max_size) = self.config.max_string_size() {
-            if len as usize > max_size {
-                return Err(crate::Error::Protocol(ProtocolError::new(
-                    ProtocolErrorKind::SizeLimit,
-                    format!(
-                        "Byte array size {} exceeds maximum allowed size of {}",
-                        len, max_size
-                    ),
-                )));
-            }
-        }
-
-        let mut buf = vec![0u8; len as usize];
+        let len = self.read_binary_len()?;
+        let mut buf = vec![0u8; len];
         self.transport
             .read_exact(&mut buf)
             .map_err(From::from)
             .map(|_| buf)
+    }
+
+    fn skip_binary(&mut self) -> crate::Result<()> {
+        let len = self.read_binary_len()?;
+        super::discard_exact(&mut self.transport, len).map_err(From::from)
     }
 
     fn read_i8(&mut self) -> crate::Result<i8> {
@@ -283,15 +339,15 @@ where
     }
 
     fn read_i16(&mut self) -> crate::Result<i16> {
-        self.transport.read_varint::<i16>().map_err(From::from)
+        Ok(zigzag_to_i32(self.read_varint32()?) as i16)
     }
 
     fn read_i32(&mut self) -> crate::Result<i32> {
-        self.transport.read_varint::<i32>().map_err(From::from)
+        Ok(zigzag_to_i32(self.read_varint32()?))
     }
 
     fn read_i64(&mut self) -> crate::Result<i64> {
-        self.transport.read_varint::<i64>().map_err(From::from)
+        Ok(zigzag_to_i64(self.read_varint64()?))
     }
 
     fn read_double(&mut self) -> crate::Result<f64> {
@@ -332,7 +388,7 @@ where
     }
 
     fn read_map_begin(&mut self) -> crate::Result<TMapIdentifier> {
-        let element_count = self.transport.read_varint::<u32>()? as i32;
+        let element_count = self.read_varint32()? as i32;
         if element_count == 0 {
             Ok(TMapIdentifier::new(None, None, 0))
         } else {
@@ -387,6 +443,16 @@ pub(crate) fn compact_protocol_min_serialized_size(field_type: TType) -> usize {
         TType::Uuid => 16,  // 16 bytes
         TType::Utf7 => 1,   // 1 byte
     }
+}
+
+#[inline]
+fn zigzag_to_i32(n: u32) -> i32 {
+    ((n >> 1) as i32) ^ (0i32.wrapping_sub((n & 1) as i32))
+}
+
+#[inline]
+fn zigzag_to_i64(n: u64) -> i64 {
+    ((n >> 1) as i64) ^ (0i64.wrapping_sub((n & 1) as i64))
 }
 
 impl<T> io::Seek for TCompactInputProtocol<T>
@@ -447,6 +513,8 @@ where
     pending_write_bool_field_identifier: Option<TFieldIdentifier>,
     // Underlying transport used for byte-level operations.
     transport: T,
+    config: TConfiguration,
+    recursion_depth: usize,
 }
 
 impl<T> TCompactOutputProtocol<T>
@@ -455,12 +523,30 @@ where
 {
     /// Create a `TCompactOutputProtocol` that writes bytes to `transport`.
     pub fn new(transport: T) -> TCompactOutputProtocol<T> {
+        Self::with_config(transport, TConfiguration::default())
+    }
+
+    pub fn with_config(transport: T, config: TConfiguration) -> TCompactOutputProtocol<T> {
         TCompactOutputProtocol {
             last_write_field_id: 0,
             write_field_id_stack: Vec::new(),
             pending_write_bool_field_identifier: None,
             transport,
+            config,
+            recursion_depth: 0,
         }
+    }
+
+    fn check_recursion_depth(&self) -> crate::Result<()> {
+        if let Some(limit) = self.config.max_recursion_depth() {
+            if self.recursion_depth >= limit {
+                return Err(crate::Error::Protocol(ProtocolError::new(
+                    ProtocolErrorKind::DepthLimit,
+                    format!("Maximum recursion depth {} exceeded", limit),
+                )));
+            }
+        }
+        Ok(())
     }
 
     // FIXME: field_type as unconstrained u8 is bad
@@ -488,12 +574,13 @@ where
         } else {
             let header = 0xF0 | elem_identifier;
             self.write_byte(header)?;
+            let mut buf = [0_u8; MAX_VARINT32_BYTES];
+            let mut writer = Cursor::new(&mut buf[..]);
             // element count is strictly positive as per the spec, so
             // cast i32 as u32 so that varint writing won't use zigzag encoding
-            self.transport
-                .write_varint(element_count as u32)
-                .map_err(From::from)
-                .map(|_| ())
+            writer.write_u32_varint(element_count as u32)?;
+            let len = writer.position() as usize;
+            self.transport.write_all(&buf[..len]).map_err(From::from)
         }
     }
 
@@ -511,9 +598,12 @@ where
     fn write_message_begin(&mut self, identifier: &TMessageIdentifier) -> crate::Result<()> {
         self.write_byte(COMPACT_PROTOCOL_ID)?;
         self.write_byte((u8::from(identifier.message_type) << 5) | COMPACT_VERSION)?;
+        let mut buf = [0_u8; MAX_VARINT32_BYTES];
+        let mut writer = Cursor::new(&mut buf[..]);
         // cast i32 as u32 so that varint writing won't use zigzag encoding
-        self.transport
-            .write_varint(identifier.sequence_number as u32)?;
+        writer.write_u32_varint(identifier.sequence_number as u32)?;
+        let len = writer.position() as usize;
+        self.transport.write_all(&buf[..len])?;
         self.write_string(&identifier.name)?;
         Ok(())
     }
@@ -524,6 +614,8 @@ where
     }
 
     fn write_struct_begin(&mut self, _: &TStructIdentifier) -> crate::Result<()> {
+        self.check_recursion_depth()?;
+        self.recursion_depth += 1;
         self.write_field_id_stack.push(self.last_write_field_id);
         self.last_write_field_id = 0;
         Ok(())
@@ -535,6 +627,7 @@ where
             .write_field_id_stack
             .pop()
             .expect("should have previous field ids");
+        self.recursion_depth -= 1;
         Ok(())
     }
 
@@ -587,9 +680,13 @@ where
     }
 
     fn write_bytes(&mut self, b: &[u8]) -> crate::Result<()> {
+        let mut buf = [0_u8; MAX_VARINT32_BYTES];
+        let mut writer = Cursor::new(&mut buf[..]);
         // length is strictly positive as per the spec, so
         // cast i32 as u32 so that varint writing won't use zigzag encoding
-        self.transport.write_varint(b.len() as u32)?;
+        writer.write_u32_varint(b.len() as u32)?;
+        let len = writer.position() as usize;
+        self.transport.write_all(&buf[..len])?;
         self.transport.write_all(b).map_err(From::from)
     }
 
@@ -598,24 +695,27 @@ where
     }
 
     fn write_i16(&mut self, i: i16) -> crate::Result<()> {
-        self.transport
-            .write_varint(i)
-            .map_err(From::from)
-            .map(|_| ())
+        let mut buf = [0_u8; MAX_VARINT16_BYTES];
+        let mut writer = Cursor::new(&mut buf[..]);
+        writer.write_i16_varint(i)?;
+        let len = writer.position() as usize;
+        self.transport.write_all(&buf[..len]).map_err(From::from)
     }
 
     fn write_i32(&mut self, i: i32) -> crate::Result<()> {
-        self.transport
-            .write_varint(i)
-            .map_err(From::from)
-            .map(|_| ())
+        let mut buf = [0_u8; MAX_VARINT32_BYTES];
+        let mut writer = Cursor::new(&mut buf[..]);
+        writer.write_i32_varint(i)?;
+        let len = writer.position() as usize;
+        self.transport.write_all(&buf[..len]).map_err(From::from)
     }
 
     fn write_i64(&mut self, i: i64) -> crate::Result<()> {
-        self.transport
-            .write_varint(i)
-            .map_err(From::from)
-            .map(|_| ())
+        let mut buf = [0_u8; MAX_VARINT64_BYTES];
+        let mut writer = Cursor::new(&mut buf[..]);
+        writer.write_i64_varint(i)?;
+        let len = writer.position() as usize;
+        self.transport.write_all(&buf[..len]).map_err(From::from)
     }
 
     fn write_double(&mut self, d: f64) -> crate::Result<()> {
@@ -654,9 +754,13 @@ where
         if identifier.size == 0 {
             self.write_byte(0)
         } else {
+            let mut buf = [0_u8; MAX_VARINT32_BYTES];
+            let mut writer = Cursor::new(&mut buf[..]);
             // element count is strictly positive as per the spec, so
             // cast i32 as u32 so that varint writing won't use zigzag encoding
-            self.transport.write_varint(identifier.size as u32)?;
+            writer.write_u32_varint(identifier.size as u32)?;
+            let len = writer.position() as usize;
+            self.transport.write_all(&buf[..len])?;
 
             let key_type = identifier
                 .key_type
@@ -2899,6 +3003,29 @@ mod tests {
         assert!(i_prot.read_map_end().is_ok()); // will blow up if we try to read from empty buffer
     }
 
+    #[test]
+    fn must_reject_overlong_varint_i64() {
+        let (mut i_prot, _) = test_objects();
+        i_prot.transport.set_readable_bytes(&[0x80u8; 11]); // 11 continuation bytes, no terminator
+        let res = i_prot.read_i64();
+        assert!(res.is_err());
+        match res {
+            Err(crate::Error::Protocol(e)) => {
+                assert_eq!(e.kind, ProtocolErrorKind::InvalidData);
+            }
+            _ => panic!("expected Protocol/InvalidData error"),
+        }
+    }
+
+    #[test]
+    fn must_accept_valid_10_byte_varint_i64() {
+        let (mut i_prot, _) = test_objects();
+        let mut bytes = [0x80u8; 10];
+        bytes[9] = 0x01; // terminating byte
+        i_prot.transport.set_readable_bytes(&bytes);
+        assert!(i_prot.read_i64().is_ok());
+    }
+
     fn test_objects() -> (
         TCompactInputProtocol<ReadHalf<TBufferChannel>>,
         TCompactOutputProtocol<WriteHalf<TBufferChannel>>,
@@ -3049,9 +3176,10 @@ mod tests {
         match result {
             Err(crate::Error::Protocol(e)) => {
                 assert_eq!(e.kind, ProtocolErrorKind::SizeLimit);
-                assert!(e
-                    .message
-                    .contains("1600 bytes, exceeding message size limit of 1000"));
+                assert!(
+                    e.message
+                        .contains("1600 bytes, exceeding message size limit of 1000")
+                );
             }
             _ => panic!("Expected protocol error with SizeLimit"),
         }

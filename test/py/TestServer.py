@@ -21,17 +21,57 @@
 import logging
 import os
 import signal
+import socketserver
 import ssl
 import sys
 import time
+from http.server import HTTPServer
 from optparse import OptionParser
 
 from util import local_libpath
 sys.path.insert(0, local_libpath())
 from thrift.protocol import TProtocol, TProtocolDecorator
 from thrift.Thrift import TException
+from thrift.transport import TSocket, TSSLSocket
 
 SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
+
+
+def report_bound_port(port_file, handle):
+    if port_file:
+        address = handle.getsockname()
+        if not isinstance(address, tuple) or len(address) < 2 \
+                or not isinstance(address[1], int):
+            raise ValueError('port reporting requires a TCP socket')
+        with open(port_file, 'w') as output:
+            output.write(str(address[1]))
+
+
+class TPortReportingServerSocket(TSocket.TServerSocket):
+    def __init__(self, host, port, unix_socket, port_file):
+        super(TPortReportingServerSocket, self).__init__(host, port, unix_socket)
+        self.port_file = port_file
+
+    def listen(self):
+        super(TPortReportingServerSocket, self).listen()
+        report_bound_port(self.port_file, self.handle)
+
+
+class TPortReportingSSLServerSocket(TSSLSocket.TSSLServerSocket):
+    def __init__(self, host, port, port_file, **kwargs):
+        super(TPortReportingSSLServerSocket, self).__init__(host, port, **kwargs)
+        self.port_file = port_file
+
+    def listen(self):
+        super(TPortReportingSSLServerSocket, self).listen()
+        report_bound_port(self.port_file, self.handle)
+
+
+class TLocalHTTPServer(HTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = 'localhost'
+        self.server_port = self.server_address[1]
 
 
 class TestHandler(object):
@@ -80,6 +120,11 @@ class TestHandler(object):
     def testBinary(self, thing):
         if self.options.verbose > 1:
             logging.info('testBinary()')  # TODO: hex output
+        return thing
+
+    def testUuid(self, thing):
+        if self.options.verbose > 1:
+            logging.info('testUuid(%s)' % thing)
         return thing
 
     def testStruct(self, thing):
@@ -301,12 +346,28 @@ def main(options):
 
     # Handle THttpServer as a special case
     if server_type == 'THttpServer':
+        # Avoid HTTPServer's external hostname lookup for local ephemeral tests.
+        http_host = '127.0.0.1' if options.port_file else ''
+        http_server_class = TLocalHTTPServer if options.port_file else HTTPServer
         if options.ssl:
             __certfile = os.path.join(os.path.dirname(SCRIPT_DIR), "keys", "server.crt")
             __keyfile = os.path.join(os.path.dirname(SCRIPT_DIR), "keys", "server.key")
-            server = THttpServer.THttpServer(processor, ('', options.port), pfactory, cert_file=__certfile, key_file=__keyfile)
+            server = THttpServer.THttpServer(
+                processor,
+                (http_host, options.port),
+                pfactory,
+                cert_file=__certfile,
+                key_file=__keyfile,
+                server_class=http_server_class,
+            )
         else:
-            server = THttpServer.THttpServer(processor, ('', options.port), pfactory)
+            server = THttpServer.THttpServer(
+                processor,
+                (http_host, options.port),
+                pfactory,
+                server_class=http_server_class,
+            )
+        report_bound_port(options.port_file, server.httpd.socket)
         server.serve()
         sys.exit(0)
 
@@ -314,15 +375,15 @@ def main(options):
 
     host = None
     if options.ssl:
-        from thrift.transport import TSSLSocket
         keys_dir = os.path.join(os.path.dirname(SCRIPT_DIR), 'keys')
-        ca_certs = os.path.join(keys_dir, 'client.pem')
+        ca_certs = os.path.join(keys_dir, 'client_v3.crt')
         certfile = os.path.join(keys_dir, 'server.crt')
         keyfile = os.path.join(keys_dir, 'server.key')
         ssl_version = getattr(ssl, 'PROTOCOL_TLS_SERVER', ssl.PROTOCOL_TLSv1)
-        transport = TSSLSocket.TSSLServerSocket(
+        transport = TPortReportingSSLServerSocket(
             host,
             options.port,
+            options.port_file,
             certfile=certfile,
             keyfile=keyfile,
             ca_certs=ca_certs,
@@ -330,7 +391,8 @@ def main(options):
             ssl_version=ssl_version,
         )
     else:
-        transport = TSocket.TServerSocket(host, options.port, options.domain_socket)
+        transport = TPortReportingServerSocket(
+            host, options.port, options.domain_socket, options.port_file)
     tfactory = TTransport.TBufferedTransportFactory()
     if options.trans == 'buffered':
         tfactory = TTransport.TBufferedTransportFactory()
@@ -351,26 +413,14 @@ def main(options):
     if server_type == "TNonblockingServer":
         server = TNonblockingServer.TNonblockingServer(processor, transport, inputProtocolFactory=pfactory)
     elif server_type == "TProcessPoolServer":
-        import signal
         from thrift.server import TProcessPoolServer
         server = TProcessPoolServer.TProcessPoolServer(processor, transport, tfactory, pfactory)
         server.setNumWorkers(5)
 
-        def set_alarm():
-            def clean_shutdown(signum, frame):
-                for worker in server.workers:
-                    if options.verbose > 0:
-                        logging.info('Terminating worker: %s' % worker)
-                    worker.terminate()
-                if options.verbose > 0:
-                    logging.info('Requesting server to stop()')
-                try:
-                    server.stop()
-                except Exception:
-                    pass
-            signal.signal(signal.SIGALRM, clean_shutdown)
-            signal.alarm(4)
-        set_alarm()
+        def stop_process_pool(signum, frame):
+            raise SystemExit
+
+        signal.signal(signal.SIGTERM, stop_process_pool)
     else:
         # look up server class dynamically to instantiate server
         ServerClass = getattr(TServer, server_type)
@@ -396,6 +446,8 @@ if __name__ == '__main__':
                       help='include this directory to sys.path for locating generated code')
     parser.add_option("--port", type="int", dest="port",
                       help="port number for server to listen on")
+    parser.add_option("--port-file", dest="port_file",
+                      help="write the bound TCP port to this file")
     parser.add_option("--zlib", action="store_true", dest="zlib",
                       help="use zlib wrapper for compressed transport")
     parser.add_option("--ssl", action="store_true", dest="ssl",
@@ -426,7 +478,6 @@ if __name__ == '__main__':
     from thrift.TMultiplexedProcessor import TMultiplexedProcessor
     from thrift.transport import THeaderTransport
     from thrift.transport import TTransport
-    from thrift.transport import TSocket
     from thrift.transport import TZlibTransport
     from thrift.protocol import TBinaryProtocol
     from thrift.protocol import TCompactProtocol

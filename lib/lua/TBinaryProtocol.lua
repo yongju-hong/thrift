@@ -155,6 +155,10 @@ function TBinaryProtocol:readMessageBegin()
     if self.strictRead then
       terror(TProtocolException:new{message = 'No protocol version header'})
     end
+    -- The pre-versioned header names its own length, and it is the first
+    -- thing read off a connection. readString() holds every other declared
+    -- length to checkStringSize(); this one has to go through it as well.
+    self:checkStringSize(sz)
     name = self.trans:readAll(sz)
     ttype = self:readByte()
     seqid = self:readI32()
@@ -188,6 +192,10 @@ function TBinaryProtocol:readMapBegin()
   local ktype = self:readByte()
   local vtype = self:readByte()
   local size = self:readI32()
+  if size < 0 then
+    terror(TProtocolException:new{errorCode = TProtocolException.NEGATIVE_SIZE})
+  end
+  self:checkContainerSize(size)
   return ktype, vtype, size
 end
 
@@ -197,6 +205,10 @@ end
 function TBinaryProtocol:readListBegin()
   local etype = self:readByte()
   local size = self:readI32()
+  if size < 0 then
+    terror(TProtocolException:new{errorCode = TProtocolException.NEGATIVE_SIZE})
+  end
+  self:checkContainerSize(size)
   return etype, size
 end
 
@@ -206,6 +218,10 @@ end
 function TBinaryProtocol:readSetBegin()
   local etype = self:readByte()
   local size = self:readI32()
+  if size < 0 then
+    terror(TProtocolException:new{errorCode = TProtocolException.NEGATIVE_SIZE})
+  end
+  self:checkContainerSize(size)
   return etype, size
 end
 
@@ -258,6 +274,10 @@ end
 
 function TBinaryProtocol:readString()
   local len = self:readI32()
+  if len < 0 then
+    terror(TProtocolException:new{errorCode = TProtocolException.NEGATIVE_SIZE})
+  end
+  self:checkStringSize(len)
   local str = self.trans:readAll(len)
   return str
 end

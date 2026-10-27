@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -29,11 +30,11 @@ module HeaderProtocolHelper
         n >>= 7
       end
     end
-    bytes.pack('C*')
+    bytes.pack("C*")
   end
 
-  def build_header_frame(header_data, payload = Thrift::Bytes.empty_byte_buffer, header_words: nil)
-    header_data = Thrift::Bytes.force_binary_encoding(header_data)
+  def build_header_frame(header_data, payload = Thrift::Bytes.empty_byte_buffer, header_words: nil, sequence_id: 0)
+    header_data = header_data.b
     if header_words.nil?
       padding = (4 - (header_data.bytesize % 4)) % 4
       header_data += "\x00" * padding
@@ -42,11 +43,11 @@ module HeaderProtocolHelper
 
     frame_size = 2 + 2 + 4 + 2 + header_data.bytesize + payload.bytesize
     frame = Thrift::Bytes.empty_byte_buffer
-    frame << [frame_size].pack('N')
-    frame << [Thrift::HeaderTransport::HEADER_MAGIC].pack('n')
-    frame << [0].pack('n')
-    frame << [0].pack('N')
-    frame << [header_words].pack('n')
+    frame << [frame_size].pack("N")
+    frame << [Thrift::HeaderTransport::HEADER_MAGIC].pack("n")
+    frame << [0].pack("n")
+    frame << [sequence_id].pack("N")
+    frame << [header_words].pack("n")
     frame << header_data
     frame << payload
     frame

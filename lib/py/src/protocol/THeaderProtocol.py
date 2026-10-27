@@ -139,6 +139,9 @@ class THeaderProtocol(TProtocolBase):
     def writeBinary(self, str_val):
         return self._protocol.writeBinary(str_val)
 
+    def writeUuid(self, uuid):
+        return self._protocol.writeUuid(uuid)
+
     def _set_protocol(self):
         try:
             protocol_cls = PROTOCOLS_BY_ID[self.trans.protocol_id]
@@ -151,6 +154,17 @@ class THeaderProtocol(TProtocolBase):
         self._protocol = protocol_cls(self.trans)
         self._fast_encode = self._protocol._fast_encode
         self._fast_decode = self._protocol._fast_decode
+
+    # The accelerated decoder reads these limits off the protocol object. Expose
+    # the inner protocol's current values so the fast path applies the same
+    # string and container bounds as the delegated read methods below.
+    @property
+    def string_length_limit(self):
+        return self._protocol.string_length_limit
+
+    @property
+    def container_length_limit(self):
+        return self._protocol.container_length_limit
 
     def readMessageBegin(self):
         try:
@@ -217,6 +231,9 @@ class THeaderProtocol(TProtocolBase):
 
     def readBinary(self):
         return self._protocol.readBinary()
+
+    def readUuid(self):
+        return self._protocol.readUuid()
 
 
 class THeaderProtocolFactory(TProtocolFactory):

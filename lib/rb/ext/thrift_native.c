@@ -92,6 +92,7 @@ ID skip_method_id;
 ID write_method_id;
 ID read_all_method_id;
 ID read_into_buffer_method_id;
+ID reset_message_size_method_id;
 ID force_binary_encoding_id;
 ID convert_to_utf8_byte_buffer_id;
 ID convert_to_string_id;
@@ -99,8 +100,10 @@ ID convert_to_string_id;
 // constant ids
 ID fields_const_id;
 ID transport_ivar_id;
+ID reset_message_size_ivar_id;
 ID strict_read_ivar_id;
 ID strict_write_ivar_id;
+ID max_string_size_ivar_id;
 
 // cached symbols
 VALUE type_sym;
@@ -121,6 +124,7 @@ int PROTOERR_BAD_VERSION;
 int PROTOERR_NOT_IMPLEMENTED;
 int PROTOERR_DEPTH_LIMIT;
 
+// cppcheck-suppress unusedFunction
 RUBY_FUNC_EXPORTED void Init_thrift_native(void) {
   // cached classes
   thrift_module = rb_const_get(rb_cObject, rb_intern("Thrift"));
@@ -199,6 +203,7 @@ RUBY_FUNC_EXPORTED void Init_thrift_native(void) {
   write_method_id = rb_intern("write");
   read_all_method_id = rb_intern("read_all");
   read_into_buffer_method_id = rb_intern("read_into_buffer");
+  reset_message_size_method_id = rb_intern("reset_message_size");
   force_binary_encoding_id = rb_intern("force_binary_encoding");
   convert_to_utf8_byte_buffer_id = rb_intern("convert_to_utf8_byte_buffer");
   convert_to_string_id = rb_intern("convert_to_string");
@@ -206,8 +211,10 @@ RUBY_FUNC_EXPORTED void Init_thrift_native(void) {
   // constant ids
   fields_const_id = rb_intern("FIELDS");
   transport_ivar_id = rb_intern("@trans");
+  reset_message_size_ivar_id = rb_intern("@reset_message_size");
   strict_read_ivar_id = rb_intern("@strict_read");
   strict_write_ivar_id = rb_intern("@strict_write");
+  max_string_size_ivar_id = rb_intern("@max_string_size");
 
   // cached symbols
   type_sym = ID2SYM(rb_intern("type"));

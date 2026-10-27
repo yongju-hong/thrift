@@ -70,8 +70,12 @@ class TFramedTransport extends TLayeredTransport
         try {
             var data = Bytes.alloc(len);
 
+            // off is the caller's running offset into the logical stream (readAll advances it
+            // after a short read). buf is an append-only BytesBuffer, so that offset is honoured
+            // by the appends below; data is a fresh per-call scratch buffer of length len and is
+            // always filled from index 0. Indexing it by off would run past its end.
             if ((readBuffer_ != null) && (readBuffer_.position < readBuffer_.length)) {
-                var got : Int = readBuffer_.readBytes(data, off, len);
+                var got : Int = readBuffer_.readBytes(data, 0, len);
                 if (got > 0) {
                     buf.addBytes(data,0,got);
                     return got;
@@ -81,7 +85,7 @@ class TFramedTransport extends TLayeredTransport
             // Read another frame of data
             readFrame();
 
-            var got = readBuffer_.readBytes(data, off, len);
+            var got = readBuffer_.readBytes(data, 0, len);
             buf.addBytes(data,0,got);
             return got;
         }
@@ -106,6 +110,13 @@ class TFramedTransport extends TLayeredTransport
 
 
     function readFrame() : Void {
+        // Return the budget to the configured maximum before reading anything. What is left of
+        // it describes the frame we have just finished with, and the endpoint charges every read
+        // against it (see TSocket), so without this the header read below fails as soon as a
+        // frame follows another with no flush in between -- which is what a run of one-way calls
+        // looks like, the generated processor returning before the flush for a one-way function.
+        ResetMessageSizeAndConsumedBytes();
+
         var size : Int = readFrameSize();
 
         if (size < 0) {

@@ -1,4 +1,5 @@
 # encoding: ascii-8bit
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -82,6 +83,7 @@ module Thrift
 
     # Write methods - delegate to underlying protocol
     def write_message_begin(name, type, seqid)
+      @header_transport.sequence_id = seqid
       @protocol.write_message_begin(name, type, seqid)
     end
 
@@ -176,8 +178,9 @@ module Thrift
         @header_transport.reset_protocol
         reset_protocol_if_needed
       rescue ProtocolException => ex
+        use_default_protocol
         app_ex = ApplicationException.new(ApplicationException::INVALID_PROTOCOL, ex.message)
-        write_message_begin("", MessageTypes::EXCEPTION, 0)
+        write_message_begin("", MessageTypes::EXCEPTION, @header_transport.sequence_id)
         app_ex.write(self)
         write_message_end
         @header_transport.flush
@@ -262,12 +265,16 @@ module Thrift
       @protocol.read_binary
     end
 
+    def skip_string
+      @protocol.skip_string
+    end
+
     def read_uuid
       @protocol.read_uuid
     end
 
     def to_s
-      "header(#{@protocol.to_s})"
+      "header(#{@protocol})"
     end
 
     private
@@ -281,6 +288,12 @@ module Thrift
       end
     end
 
+    def use_default_protocol
+      @protocol = create_protocol(@default_protocol)
+      @current_protocol_id = @default_protocol
+      @header_transport.protocol_id = @default_protocol
+    end
+
     # Creates a protocol instance based on protocol ID
     def create_protocol(protocol_id)
       case protocol_id
@@ -291,7 +304,7 @@ module Thrift
       else
         raise ProtocolException.new(
           ProtocolException::INVALID_DATA,
-          "Unknown protocol ID: #{protocol_id}"
+          "Unknown protocol ID: #{protocol_id}",
         )
       end
     end

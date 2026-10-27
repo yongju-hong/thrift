@@ -63,6 +63,12 @@ union TestUnion {
   6: uuid uuid_field;
 }
 
+const TestUnion UNION_CONSTANT = {"string_field": "default union value"}
+
+struct StructWithUnionDefault {
+  1: TestUnion union_field = {"string_field": "default union value"}
+}
+
 struct Foo {
   1: i32 simple = 53,
   2: string words = "words",
@@ -184,4 +190,24 @@ struct NestedMapInMapKey {
 
 struct NestedMapInMapValue {
   2: map<byte, map<byte, byte>> value
+}
+
+# Recursive types for the struct/union/exception recursion-depth limit specs (THRIFT-6045).
+struct RecTree {
+  1: list<RecTree> children
+  2: i16 item
+}
+
+struct RecStruct {
+  1: optional RecStruct child
+}
+
+union RecUnion {
+  1: list<RecUnion> children
+  2: i32 leaf
+}
+
+exception RecError {
+  1: list<RecError> children
+  2: i32 leaf
 }

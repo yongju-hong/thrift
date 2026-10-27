@@ -35,7 +35,9 @@ if 'vagrant' in str(os.environ):
 
 include_dirs = ['src']
 if sys.platform == 'win32':
-    include_dirs.append('compat/win32')
+    # Windows ARM64 builds require the real stdint.h.
+    if os.environ.get('CIBUILDWHEEL') != '1':
+        include_dirs.append('compat/win32')
     ext_errors = (CompileError, ExecError, PlatformError, IOError)
 else:
     ext_errors = (CompileError, ExecError, PlatformError)
@@ -78,12 +80,20 @@ def run_setup(with_binary):
         extensions = dict(
             ext_modules=[
                 Extension('thrift.protocol.fastbinary',
-                          extra_compile_args=['-std=c++11'],
+                          extra_compile_args=[] if sys.platform == 'win32' else ['-std=c++11'],
                           sources=[
                               'src/ext/module.cpp',
                               'src/ext/types.cpp',
                               'src/ext/binary.cpp',
                               'src/ext/compact.cpp',
+                          ],
+                          depends=[
+                              'src/ext/binary.h',
+                              'src/ext/compact.h',
+                              'src/ext/endian.h',
+                              'src/ext/protocol.h',
+                              'src/ext/protocol.tcc',
+                              'src/ext/types.h',
                           ],
                           include_dirs=include_dirs,
                           )
@@ -94,13 +104,11 @@ def run_setup(with_binary):
         extensions = dict()
 
     ssl_deps = []
-    if sys.hexversion < 0x03050000:
-        ssl_deps.append('backports.ssl_match_hostname>=3.5')
     tornado_deps = ['tornado>=6.3.0']
     twisted_deps = ['twisted>=24.3.0', 'zope.interface>=6.1']
 
     setup(name='thrift',
-          version='0.23.0',
+          version='0.26.0',
           description='Python bindings for the Apache Thrift RPC system',
           long_description=read_file("README.md"),
           long_description_content_type="text/markdown",
@@ -136,14 +144,20 @@ def run_setup(with_binary):
 
 
 try:
-    with_binary = True
-    run_setup(with_binary)
+    run_setup(with_binary=True)
 except BuildFailed:
     print()
     print('*' * 80)
     print("An error occurred while trying to compile with the C extension enabled")
+
+    if os.environ.get('CIBUILDWHEEL') == '1':
+        print('Refusing to build a release wheel without the C extension')
+        print('*' * 80)
+        raise
+
     print("Attempting to build without the extension now")
     print('*' * 80)
     print()
-
-    run_setup(False)
+    # Fall back to the pure-Python build. If this also fails, let the
+    # exception propagate so the build backend reports the real error.
+    run_setup(with_binary=False)

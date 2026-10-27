@@ -95,25 +95,6 @@ public:
     indent(out) << "}" << postfix;
   }
 
-  string replace_all(string contents, string search, string repl) {
-    string str(contents);
-
-    size_t slen = search.length();
-    size_t rlen = repl.length();
-    size_t incr = (rlen > 0) ? rlen : 1;
-
-    if (slen > 0) {
-      size_t found = str.find(search);
-      while ((found != string::npos) && (found < str.length())) {
-        str.replace(found, slen, repl);
-        found = str.find(search, found + incr);
-      }
-    }
-
-    return str;
-  }
-
-
   /**
    * Init and close methods
    */
@@ -167,7 +148,6 @@ public:
   void generate_dart_struct_result_writer(std::ostream& out, t_struct* tstruct);
   void generate_dart_struct_writer(std::ostream& out, t_struct* tstruct);
   void generate_dart_struct_tostring(std::ostream& out, t_struct* tstruct);
-  std::string get_dart_type_string(t_type* type);
   void generate_generic_field_getters(std::ostream& out, t_struct* tstruct);
   void generate_generic_field_setters(std::ostream& out, t_struct* tstruct);
   void generate_generic_isset_method(std::ostream& out, t_struct* tstruct);
@@ -889,6 +869,9 @@ void t_dart_generator::generate_dart_struct_reader(ostream& out, t_struct* tstru
 
   // Declare stack tmp variables and read struct header
   indent(out) << "TField field;" << '\n';
+  indent(out) << "iprot.incrementRecursionDepth();" << '\n';
+  indent(out) << "try";
+  scope_up(out);
   indent(out) << "iprot.readStructBegin();" << '\n';
 
   // Loop over reading in fields
@@ -963,7 +946,12 @@ void t_dart_generator::generate_dart_struct_reader(ostream& out, t_struct* tstru
   // performs various checks (e.g. check that all required fields are set)
   indent(out) << "validate();" << '\n';
 
-  scope_down(out, "\n\n");
+  scope_down(out, " finally"); // close try, begin finally
+  scope_up(out);
+  indent(out) << "iprot.decrementRecursionDepth();" << '\n';
+  scope_down(out); // close finally
+
+  scope_down(out, "\n\n"); // close read() function
 }
 
 // generates dart method to perform various checks
@@ -1029,6 +1017,9 @@ void t_dart_generator::generate_dart_struct_writer(ostream& out, t_struct* tstru
   // performs various checks (e.g. check that all required fields are set)
   indent(out) << "validate();" << '\n' << '\n';
 
+  indent(out) << "oprot.incrementRecursionDepth();" << '\n';
+  indent(out) << "try";
+  scope_up(out);
   indent(out) << "oprot.writeStructBegin(_STRUCT_DESC);" << '\n';
 
   for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
@@ -1064,7 +1055,12 @@ void t_dart_generator::generate_dart_struct_writer(ostream& out, t_struct* tstru
   indent(out) << "oprot.writeFieldStop();" << '\n' << indent() << "oprot.writeStructEnd();"
       << '\n';
 
-  scope_down(out, "\n\n");
+  scope_down(out, " finally"); // close try, begin finally
+  scope_up(out);
+  indent(out) << "oprot.decrementRecursionDepth();" << '\n';
+  scope_down(out); // close finally
+
+  scope_down(out, "\n\n"); // close write() function
 }
 
 /**
@@ -1082,6 +1078,9 @@ void t_dart_generator::generate_dart_struct_result_writer(ostream& out, t_struct
   const vector<t_field*>& fields = tstruct->get_sorted_members();
   vector<t_field*>::const_iterator f_iter;
 
+  indent(out) << "oprot.incrementRecursionDepth();" << '\n';
+  indent(out) << "try";
+  scope_up(out);
   indent(out) << "oprot.writeStructBegin(_STRUCT_DESC);" << '\n' << '\n';
 
   bool first = true;
@@ -1113,7 +1112,12 @@ void t_dart_generator::generate_dart_struct_result_writer(ostream& out, t_struct
   indent(out) << "oprot.writeFieldStop();" << '\n' << indent()
       << "oprot.writeStructEnd();" << '\n';
 
-  scope_down(out, "\n\n");
+  scope_down(out, " finally"); // close try, begin finally
+  scope_up(out);
+  indent(out) << "oprot.decrementRecursionDepth();" << '\n';
+  scope_down(out); // close finally
+
+  scope_down(out, "\n\n"); // close write() function
 }
 
 void t_dart_generator::generate_generic_field_getters(std::ostream& out,
@@ -1349,61 +1353,6 @@ void t_dart_generator::generate_dart_struct_tostring(ostream& out,
   indent(out) << "return ret.toString();" << '\n';
 
   scope_down(out, "\n\n");
-}
-
-/**
- * Returns a string with the dart representation of the given thrift type
- * (e.g. for the type struct it returns "TType.STRUCT")
- */
-std::string t_dart_generator::get_dart_type_string(t_type* type) {
-  if (type->is_list()) {
-    return "TType.LIST";
-  } else if (type->is_map()) {
-    return "TType.MAP";
-  } else if (type->is_set()) {
-    return "TType.SET";
-  } else if (type->is_struct() || type->is_xception()) {
-    return "TType.STRUCT";
-  } else if (type->is_enum()) {
-    return "TType.I32";
-  } else if (type->is_typedef()) {
-    return get_dart_type_string(((t_typedef*)type)->get_type());
-  } else if (type->is_base_type()) {
-    switch (((t_base_type*)type)->get_base()) {
-    case t_base_type::TYPE_VOID:
-      return "TType.VOID";
-      break;
-    case t_base_type::TYPE_STRING:
-      return "TType.STRING";
-      break;
-    case t_base_type::TYPE_BOOL:
-      return "TType.BOOL";
-      break;
-    case t_base_type::TYPE_I8:
-      return "TType.BYTE";
-      break;
-    case t_base_type::TYPE_I16:
-      return "TType.I16";
-      break;
-    case t_base_type::TYPE_I32:
-      return "TType.I32";
-      break;
-    case t_base_type::TYPE_I64:
-      return "TType.I64";
-      break;
-    case t_base_type::TYPE_DOUBLE:
-      return "TType.DOUBLE";
-      break;
-    default:
-      throw std::runtime_error("Unknown thrift type \"" + type->get_name()
-                               + "\" passed to t_dart_generator::get_dart_type_string!");
-      break; // This should never happen!
-    }
-  } else {
-    throw std::runtime_error(
-        "Unknown thrift type \"" + type->get_name()
-        + "\" passed to t_dart_generator::get_dart_type_string!"); // This should never happen!
-  }
 }
 
 void t_dart_generator::generate_service(t_service* tservice) {

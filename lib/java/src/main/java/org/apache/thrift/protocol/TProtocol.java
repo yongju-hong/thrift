@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.IntFunction;
+import org.apache.thrift.TBaseHelper;
 import org.apache.thrift.TException;
 import org.apache.thrift.partial.TFieldData;
 import org.apache.thrift.scheme.IScheme;
@@ -153,9 +154,14 @@ public abstract class TProtocol implements TWriteProtocol, TReadProtocol {
   }
 
   public final void writeStruct(TStruct struct, WriteCallback<Void> callback) throws TException {
-    writeStructBegin(struct);
-    callback.call(null);
-    writeStructEnd();
+    incrementRecursionDepth();
+    try {
+      writeStructBegin(struct);
+      callback.call(null);
+      writeStructEnd();
+    } finally {
+      decrementRecursionDepth();
+    }
   }
 
   public final void writeMessage(TMessage message, WriteCallback<Void> callback) throws TException {
@@ -190,10 +196,15 @@ public abstract class TProtocol implements TWriteProtocol, TReadProtocol {
    * @throws TException when any sub-operation failed
    */
   public final <T> T readStruct(ReadCallback<TStruct, T> callback) throws TException {
-    TStruct tStruct = readStructBegin();
-    T t = callback.accept(tStruct);
-    readStructEnd();
-    return t;
+    incrementRecursionDepth();
+    try {
+      TStruct tStruct = readStructBegin();
+      T t = callback.accept(tStruct);
+      readStructEnd();
+      return t;
+    } finally {
+      decrementRecursionDepth();
+    }
   }
 
   /**
@@ -264,7 +275,8 @@ public abstract class TProtocol implements TWriteProtocol, TReadProtocol {
   public final <K, V> Map<K, V> readMap(
       ReadCollectionCallback<K> keyCallback, ReadCollectionCallback<V> valueCallback)
       throws TException {
-    return readMap(keyCallback, valueCallback, size -> new HashMap<>(2 * size));
+    return readMap(
+        keyCallback, valueCallback, size -> new HashMap<>(TBaseHelper.preallocSize(2 * size)));
   }
 
   /**
@@ -341,7 +353,7 @@ public abstract class TProtocol implements TWriteProtocol, TReadProtocol {
    * @throws TException when any sub-operation fails
    */
   public final <T> List<T> readList(ReadCollectionCallback<T> callback) throws TException {
-    return readList(callback, ArrayList::new);
+    return readList(callback, size -> new ArrayList<>(TBaseHelper.preallocSize(size)));
   }
 
   /**
@@ -393,7 +405,7 @@ public abstract class TProtocol implements TWriteProtocol, TReadProtocol {
    * @throws TException when any sub-operation fails
    */
   public final <T> Set<T> readSet(ReadCollectionCallback<T> callback) throws TException {
-    return readSet(callback, size -> new HashSet<>(2 * size));
+    return readSet(callback, size -> new HashSet<>(TBaseHelper.preallocSize(2 * size)));
   }
 
   /**
@@ -441,12 +453,12 @@ public abstract class TProtocol implements TWriteProtocol, TReadProtocol {
   }
 
   public void skip(byte fieldType) throws TException {
-    this.skip(fieldType, Integer.MAX_VALUE);
+    this.skip(fieldType, this.getTransport().getConfiguration().getRecursionLimit());
   }
 
   public void skip(byte fieldType, int maxDepth) throws TException {
     if (maxDepth <= 0) {
-      throw new TException("Maximum skip depth exceeded");
+      throw new TProtocolException(TProtocolException.DEPTH_LIMIT, "Maximum skip depth exceeded");
     }
 
     switch (fieldType) {

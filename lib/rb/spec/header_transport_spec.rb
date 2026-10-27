@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -17,10 +18,10 @@
 # under the License.
 #
 
-require 'spec_helper'
-require_relative 'support/header_protocol_helper'
+require "spec_helper"
+require_relative "support/header_protocol_helper"
 
-describe 'HeaderTransport' do
+describe "HeaderTransport" do
   include HeaderProtocolHelper
 
   describe Thrift::HeaderClientType do
@@ -40,6 +41,25 @@ describe 'HeaderTransport' do
     end
   end
 
+  describe "default frame size limit" do
+    # MAX_FRAME_SIZE is the protocol's hard ceiling -- the largest value the
+    # length field can express. Defaulting to it means a four-byte header can
+    # ask for a gigabyte, which is not a limit so much as the absence of one.
+    it "does not default the maximum frame size to the hard ceiling" do
+      trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new)
+
+      expect(trans.max_frame_size).to be < Thrift::HeaderTransport::MAX_FRAME_SIZE
+      expect(trans.max_frame_size).to eq(16_384_000)
+    end
+
+    it "still lets a caller raise it up to the hard ceiling" do
+      trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new)
+      trans.set_max_frame_size(Thrift::HeaderTransport::MAX_FRAME_SIZE)
+
+      expect(trans.max_frame_size).to eq(Thrift::HeaderTransport::MAX_FRAME_SIZE)
+    end
+  end
+
   describe Thrift::HeaderTransformID do
     it "should define transform ID constants" do
       expect(Thrift::HeaderTransformID::ZLIB).to eq(0x01)
@@ -47,6 +67,45 @@ describe 'HeaderTransport' do
   end
 
   describe Thrift::HeaderTransport do
+    def header_frame(payload, headers = {})
+      buffer = Thrift::MemoryBufferTransport.new
+      writer = Thrift::HeaderTransport.new(buffer)
+      headers.each { |key, value| writer.set_header(key, value) }
+      writer.write(payload)
+      writer.flush
+      buffer.read(buffer.available)
+    end
+
+    def binary_message
+      [Thrift::BinaryProtocol::VERSION_1 | Thrift::MessageTypes::CALL].pack("N")
+    end
+
+    def compact_message
+      [0x82, 0x21, 0, 0].pack("C*")
+    end
+
+    def framed(message)
+      [message.bytesize].pack("N") + message
+    end
+
+    def unframed_message(protocol_class, name = "legacy_unframed")
+      buffer = Thrift::MemoryBufferTransport.new
+      protocol = protocol_class.new(buffer)
+      protocol.write_message_begin(name, Thrift::MessageTypes::CALL, 1)
+      protocol.write_struct_begin("Args")
+      protocol.write_field_stop
+      protocol.write_struct_end
+      protocol.write_message_end
+      buffer.read(buffer.available)
+    end
+
+    def read_unframed_message(protocol)
+      name = protocol.read_message_begin.first
+      protocol.skip(Thrift::Types::STRUCT)
+      protocol.read_message_end
+      name
+    end
+
     before(:each) do
       @underlying = Thrift::MemoryBufferTransport.new
       @trans = Thrift::HeaderTransport.new(@underlying)
@@ -111,11 +170,11 @@ describe 'HeaderTransport' do
         expect(data.bytesize).to be > 16
 
         # First 4 bytes are frame length
-        frame_size = data[0, 4].unpack('N').first
+        frame_size = data[0, 4].unpack1("N")
         expect(frame_size).to eq(data.bytesize - 4)
 
         # Next 2 bytes should be header magic
-        magic = data[4, 2].unpack('n').first
+        magic = data[4, 2].unpack1("n")
         expect(magic).to eq(Thrift::HeaderTransport::HEADER_MAGIC)
       end
 
@@ -127,6 +186,15 @@ describe 'HeaderTransport' do
         # Read back and verify it's larger due to headers
         data = @underlying.read(@underlying.available)
         expect(data.bytesize).to be > 30 # Should include header key-value
+      end
+
+      it "should write the configured sequence id into the frame header" do
+        @trans.sequence_id = 456
+        @trans.write("payload")
+        @trans.flush
+
+        data = @underlying.read(@underlying.available)
+        expect(data[8, 4].unpack1("N")).to eq(456)
       end
 
       it "should apply ZLIB transform" do
@@ -142,10 +210,350 @@ describe 'HeaderTransport' do
     end
 
     describe "frame size limits" do
-      it "should reject payloads larger than max frame size" do
+      it "should enforce the limit against the complete Header frame" do
+        {
+          5 => 19,
+          6 => 20,
+        }.each do |payload_size, declared_size|
+          underlying = Thrift::MemoryBufferTransport.new
+          trans = Thrift::HeaderTransport.new(underlying)
+          trans.set_max_frame_size(20)
+          trans.write("x" * payload_size)
+          trans.flush
+
+          frame = underlying.read(underlying.available)
+          expect(frame.unpack1("N")).to eq(declared_size)
+
+          reader = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(frame))
+          reader.set_max_frame_size(20)
+          expect(reader.read(payload_size)).to eq("x" * payload_size)
+        end
+
+        @trans.set_max_frame_size(20)
+        @trans.write("x" * 7)
+        expect { @trans.flush }.to raise_error(
+          Thrift::TransportException,
+          "Frame size 21 exceeds maximum 20",
+        )
+        expect(@underlying.available).to eq(0)
+      end
+
+      it "should include metadata and padding in the emitted frame limit" do
+        headers = {"a" => "one", "longer-key" => "two"}
+        reference_buffer = Thrift::MemoryBufferTransport.new
+        reference = Thrift::HeaderTransport.new(reference_buffer)
+        headers.each { |key, value| reference.set_header(key, value) }
+        reference.write("payload")
+        reference.flush
+        frame = reference_buffer.read(reference_buffer.available)
+        declared_size = frame.unpack1("N")
+
+        accepted_buffer = Thrift::MemoryBufferTransport.new
+        accepted = Thrift::HeaderTransport.new(accepted_buffer)
+        accepted.set_max_frame_size(declared_size)
+        headers.each { |key, value| accepted.set_header(key, value) }
+        accepted.write("payload")
+        expect { accepted.flush }.not_to raise_error
+
+        rejected_buffer = Thrift::MemoryBufferTransport.new
+        rejected = Thrift::HeaderTransport.new(rejected_buffer)
+        rejected.set_max_frame_size(declared_size - 1)
+        headers.each { |key, value| rejected.set_header(key, value) }
+        rejected.write("payload")
+        expect { rejected.flush }.to raise_error(
+          Thrift::TransportException,
+          "Frame size #{declared_size} exceeds maximum #{declared_size - 1}",
+        )
+
+        rejected.set_max_frame_size(declared_size)
+        rejected.write("payload")
+        rejected.flush
+        retry_frame = rejected_buffer.read(rejected_buffer.available)
+        reader = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(retry_frame))
+        expect(reader.read(7)).to eq("payload")
+        expect(reader.get_headers).to eq(headers)
+      end
+
+      it "should enforce the limit after applying transforms" do
+        payload = "a" * 1_000
+        reference_buffer = Thrift::MemoryBufferTransport.new
+        reference = Thrift::HeaderTransport.new(reference_buffer)
+        reference.add_transform(Thrift::HeaderTransformID::ZLIB)
+        reference.write(payload)
+        reference.flush
+        frame = reference_buffer.read(reference_buffer.available)
+        declared_size = frame.unpack1("N")
+        expect(declared_size).to be < payload.bytesize
+
+        accepted_buffer = Thrift::MemoryBufferTransport.new
+        accepted = Thrift::HeaderTransport.new(accepted_buffer)
+        accepted.add_transform(Thrift::HeaderTransformID::ZLIB)
+        accepted.set_max_frame_size(declared_size)
+        accepted.write(payload)
+        expect { accepted.flush }.not_to raise_error
+
+        accepted_frame = accepted_buffer.read(accepted_buffer.available)
+        reader = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(accepted_frame))
+        reader.set_max_frame_size(declared_size)
+        expect(reader.read(payload.bytesize)).to eq(payload)
+      end
+
+      it "should reject Header frames larger than max frame size" do
         @trans.set_max_frame_size(4)
         @trans.write("12345")
-        expect { @trans.flush }.to raise_error(Thrift::TransportException, /frame that is too large/)
+        expect { @trans.flush }.to raise_error(Thrift::TransportException, "Frame size 19 exceeds maximum 4")
+      end
+
+      {
+        "binary" => Thrift::BinaryProtocol,
+        "compact" => Thrift::CompactProtocol,
+      }.each do |protocol_name, protocol_class|
+        it "enforces max frame size for unframed #{protocol_name} messages" do
+          payload = unframed_message(protocol_class)
+
+          exact_limit = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(payload))
+          exact_limit.set_max_frame_size(payload.bytesize)
+          expect(read_unframed_message(Thrift::HeaderProtocol.new(exact_limit))).to eq("legacy_unframed")
+
+          over_limit = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(payload))
+          over_limit.set_max_frame_size(payload.bytesize - 1)
+          protocol = Thrift::HeaderProtocol.new(over_limit)
+          expect { read_unframed_message(protocol) }.to raise_error(
+            Thrift::TransportException,
+            "Unframed message size exceeds maximum #{payload.bytesize - 1}",
+          ) do |error|
+            expect(error.type).to eq(Thrift::TransportException::SIZE_LIMIT)
+          end
+        end
+      end
+
+      it "rejects an unframed protocol signature larger than the configured limit" do
+        payload = unframed_message(Thrift::BinaryProtocol)
+        read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(payload))
+        read_trans.set_max_frame_size(3)
+
+        expect { read_trans.read(1) }.to raise_error(
+          Thrift::TransportException,
+          "Unframed message size exceeds maximum 3",
+        ) do |error|
+          expect(error.type).to eq(Thrift::TransportException::SIZE_LIMIT)
+        end
+      end
+
+      it "counts bytes actually returned by partial unframed reads" do
+        payload = unframed_message(Thrift::BinaryProtocol)
+        chunked_transport = Class.new(Thrift::BaseTransport) do
+          def initialize(data)
+            @data = data.dup
+          end
+
+          def read(size)
+            @data.slice!(0, [size, 2].min)
+          end
+        end
+        read_trans = Thrift::HeaderTransport.new(chunked_transport.new(payload))
+        read_trans.set_max_frame_size(payload.bytesize)
+
+        expect(read_unframed_message(Thrift::HeaderProtocol.new(read_trans))).to eq("legacy_unframed")
+      end
+
+      it "returns partial unframed data up to the configured limit" do
+        payload = unframed_message(Thrift::BinaryProtocol)
+        chunked_transport = Class.new(Thrift::BaseTransport) do
+          def initialize(data)
+            @data = data.dup
+          end
+
+          def read(size)
+            @data.slice!(0, [size, 1].min)
+          end
+        end
+        read_trans = Thrift::HeaderTransport.new(chunked_transport.new(payload))
+        read_trans.set_max_frame_size(5)
+
+        expect(read_trans.read(payload.bytesize)).to eq(payload.byteslice(0, 5))
+        expect { read_trans.read(1) }.to raise_error(Thrift::TransportException) do |error|
+          expect(error.type).to eq(Thrift::TransportException::SIZE_LIMIT)
+        end
+      end
+
+      it "returns the unframed protocol signature at the configured limit" do
+        payload = unframed_message(Thrift::BinaryProtocol)
+        read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(payload))
+        read_trans.set_max_frame_size(4)
+
+        expect(read_trans.read(payload.bytesize)).to eq(payload.byteslice(0, 4))
+        expect { read_trans.read(1) }.to raise_error(Thrift::TransportException) do |error|
+          expect(error.type).to eq(Thrift::TransportException::SIZE_LIMIT)
+        end
+      end
+
+      protocol_pairs = {
+        "binary" => [Thrift::BinaryProtocol, Thrift::BinaryProtocol],
+        "compact" => [Thrift::CompactProtocol, Thrift::CompactProtocol],
+      }
+      if defined?(Thrift::BinaryProtocolAccelerated)
+        protocol_pairs["accelerated binary"] = [
+          Thrift::BinaryProtocol,
+          Thrift::BinaryProtocolAccelerated,
+        ]
+      end
+
+      protocol_pairs.each do |protocol_name, (writer_class, reader_class)|
+        it "resets the unframed size budget between #{protocol_name} messages" do
+          first = unframed_message(writer_class, "first")
+          second = unframed_message(writer_class, "second")
+          read_trans = Thrift::HeaderTransport.new(
+            Thrift::MemoryBufferTransport.new(first + second),
+          )
+          read_trans.set_max_frame_size([first.bytesize, second.bytesize].max)
+          expect(read_trans).to receive(:message_boundaries?).once.and_return(true)
+          protocol = reader_class.new(read_trans)
+
+          expect(read_unframed_message(protocol)).to eq("first")
+          expect(read_unframed_message(protocol)).to eq("second")
+        end
+      end
+    end
+
+    describe "decompressed size limits" do
+      it "should accept a valid max_decompressed_size" do
+        expect { @trans.set_max_decompressed_size(1024) }.not_to raise_error
+        expect { @trans.set_max_decompressed_size(Thrift::HeaderTransport::MAX_FRAME_SIZE) }.not_to raise_error
+      end
+
+      it "should reject invalid max_decompressed_size" do
+        expect { @trans.set_max_decompressed_size(0) }.to raise_error(ArgumentError)
+        expect { @trans.set_max_decompressed_size(-1) }.to raise_error(ArgumentError)
+        expect { @trans.set_max_decompressed_size(Thrift::HeaderTransport::MAX_FRAME_SIZE + 1) }.to raise_error(ArgumentError)
+      end
+
+      it "should decompress ZLIB payload within the limit" do
+        write_buf = Thrift::MemoryBufferTransport.new
+        writer = Thrift::HeaderTransport.new(write_buf)
+        writer.add_transform(Thrift::HeaderTransformID::ZLIB)
+        writer.write("A" * 1_000)
+        writer.flush
+
+        written_data = write_buf.read(write_buf.available)
+        read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(written_data))
+        read_trans.set_max_decompressed_size(2_000)
+
+        expect(read_trans.read(1_000)).to eq("A" * 1_000)
+      end
+
+      {
+        "invalid" => "not-zlib",
+        "truncated" => Zlib::Deflate.deflate("valid payload")[0...-1],
+      }.each do |failure_type, payload|
+        it "adapts #{failure_type} ZLIB payloads to the transport exception boundary" do
+          header_data = [
+            Thrift::HeaderSubprotocolID::BINARY,
+            1,
+            Thrift::HeaderTransformID::ZLIB,
+          ].pack("C*")
+          frame = build_header_frame(header_data, payload)
+          read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(frame))
+
+          expect { read_trans.read(1) }.to raise_error(
+            Thrift::TransportException,
+            "Invalid ZLIB payload",
+          ) do |error|
+            expect(error.type).to eq(Thrift::TransportException::UNKNOWN)
+          end
+        end
+      end
+
+      it "should raise SIZE_LIMIT TransportException when decompressed output exceeds the limit" do
+        write_buf = Thrift::MemoryBufferTransport.new
+        writer = Thrift::HeaderTransport.new(write_buf)
+        writer.add_transform(Thrift::HeaderTransformID::ZLIB)
+        writer.write("A" * 10_000)
+        writer.flush
+
+        written_data = write_buf.read(write_buf.available)
+        read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(written_data))
+        read_trans.set_max_decompressed_size(100)
+
+        expect { read_trans.read(1) }.to raise_error(Thrift::TransportException) do |e|
+          expect(e.type).to eq(Thrift::TransportException::SIZE_LIMIT)
+          expect(e.message).to match(/limit/)
+        end
+      end
+
+      it "should stream oversized ZLIB output before enforcing the limit" do
+        write_buf = Thrift::MemoryBufferTransport.new
+        writer = Thrift::HeaderTransport.new(write_buf)
+        writer.add_transform(Thrift::HeaderTransformID::ZLIB)
+        writer.write("A" * 8_000_000)
+        writer.flush
+
+        written_data = write_buf.read(write_buf.available)
+        read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(written_data))
+        read_trans.set_max_decompressed_size(100)
+
+        expect(Zlib::Inflate).to receive(:new).and_wrap_original do |new, *args|
+          inflater = new.call(*args)
+          expect(inflater).to receive(:inflate).and_wrap_original do |inflate, compressed, &block|
+            expect(block).not_to be_nil
+            inflate.call(compressed, &block)
+          end
+          inflater
+        end
+
+        expect { read_trans.read(1) }.to raise_error(Thrift::TransportException) do |e|
+          expect(e.type).to eq(Thrift::TransportException::SIZE_LIMIT)
+        end
+      end
+    end
+
+    describe "transform count limit" do
+      # Builds a HEADERS frame that lists +n_layers+ ZLIB transforms and carries
+      # +inner+ deflated once per layer.
+      def nested_zlib_frame(n_layers, inner)
+        payload = inner.b
+        n_layers.times { payload = Zlib::Deflate.deflate(payload) }
+
+        header = Thrift::Bytes.empty_byte_buffer
+        header << varint32(Thrift::HeaderSubprotocolID::BINARY)
+        header << varint32(n_layers)
+        n_layers.times { header << varint32(Thrift::HeaderTransformID::ZLIB) }
+        build_header_frame(header, payload)
+      end
+
+      # Counts how many times +read_trans+ inflates a transform layer.
+      def count_layers(read_trans)
+        layers = 0
+        original = Thrift::HeaderTransport.instance_method(:bounded_inflate)
+        read_trans.define_singleton_method(:bounded_inflate) do |compressed|
+          layers += 1
+          original.bind_call(self, compressed)
+        end
+        -> { layers }
+      end
+
+      it "round-trips a single ZLIB layer" do
+        inner = "payload-" * 128
+        frame = nested_zlib_frame(1, inner)
+        read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(frame))
+        layers = count_layers(read_trans)
+
+        expect(read_trans.read(inner.bytesize)).to eq(inner)
+        expect(layers.call).to eq(1)
+      end
+
+      it "refuses a frame that lists more than one transform" do
+        inner = "payload-" * 128
+        n_layers = 1_500
+        frame = nested_zlib_frame(n_layers, inner)
+        read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(frame))
+        layers = count_layers(read_trans)
+
+        expect { read_trans.read(1) }.to raise_error(Thrift::TransportException) do |error|
+          expect(error.type).to eq(Thrift::TransportException::SIZE_LIMIT)
+          expect(error.message).to match(/transform/)
+        end
+        expect(layers.call).to eq(0)
       end
     end
 
@@ -166,9 +574,9 @@ describe 'HeaderTransport' do
 
       it "should detect framed binary protocol" do
         # Create a framed binary message
-        payload = [Thrift::BinaryProtocol::VERSION_1 | Thrift::MessageTypes::CALL].pack('N')
+        payload = [Thrift::BinaryProtocol::VERSION_1 | Thrift::MessageTypes::CALL].pack("N")
         payload << "test"
-        frame = [payload.bytesize].pack('N') + payload
+        frame = [payload.bytesize].pack("N") + payload
 
         read_transport = Thrift::MemoryBufferTransport.new(frame)
         read_trans = Thrift::HeaderTransport.new(read_transport)
@@ -179,7 +587,7 @@ describe 'HeaderTransport' do
 
       it "should detect unframed binary protocol" do
         # Create an unframed binary message (version word first)
-        message = [Thrift::BinaryProtocol::VERSION_1 | Thrift::MessageTypes::CALL].pack('N')
+        message = [Thrift::BinaryProtocol::VERSION_1 | Thrift::MessageTypes::CALL].pack("N")
         message << "test"
 
         read_transport = Thrift::MemoryBufferTransport.new(message)
@@ -205,6 +613,76 @@ describe 'HeaderTransport' do
         expect(headers["request-id"]).to eq("12345")
       end
 
+      {
+        "framed binary" => [:binary_message, true],
+        "unframed binary" => [:binary_message, false],
+        "framed compact" => [:compact_message, true],
+        "unframed compact" => [:compact_message, false],
+      }.each do |legacy_name, (legacy_message, is_framed)|
+        it "does not carry Header metadata through a #{legacy_name} protocol switch" do
+          legacy_payload = public_send(legacy_message)
+          bytes = header_frame("A", "request-id" => "first")
+          bytes << (is_framed ? framed(legacy_payload) : legacy_payload)
+          bytes << header_frame("B", "request-id" => "second")
+          read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(bytes))
+
+          expect(read_trans.read(1)).to eq("A")
+          expect(read_trans.get_headers).to eq("request-id" => "first")
+
+          read_trans.reset_protocol
+          expect(read_trans.read(4)).to eq(legacy_payload)
+          expect(read_trans.get_headers).to eq({})
+
+          read_trans.reset_protocol
+          expect(read_trans.read(1)).to eq("B")
+          expect(read_trans.get_headers).to eq("request-id" => "second")
+        end
+      end
+
+      it "keeps metadata empty across multiple legacy frames" do
+        bytes = header_frame("A", "request-id" => "first")
+        bytes << framed(binary_message)
+        bytes << framed(binary_message)
+        read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(bytes))
+
+        expect(read_trans.read(1)).to eq("A")
+        expect(read_trans.get_headers).to eq("request-id" => "first")
+
+        2.times do
+          read_trans.reset_protocol
+          expect(read_trans.read(4)).to eq(binary_message)
+          expect(read_trans.get_headers).to eq({})
+        end
+      end
+
+      it "clears metadata before reporting a malformed following frame" do
+        malformed_frame = [4].pack("N") + "nope"
+        bytes = header_frame("A", "request-id" => "first") + malformed_frame
+        read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(bytes))
+
+        expect(read_trans.read(1)).to eq("A")
+        expect(read_trans.get_headers).to eq("request-id" => "first")
+
+        expect { read_trans.reset_protocol }.to raise_error(
+          Thrift::TransportException,
+          "Could not detect client transport type",
+        )
+        expect(read_trans.get_headers).to eq({})
+      end
+
+      it "should decode signed sequence ids from Header frames" do
+        @trans.sequence_id = -2147483648
+        @trans.write("payload")
+        @trans.flush
+
+        written_data = @underlying.read(@underlying.available)
+        read_transport = Thrift::MemoryBufferTransport.new(written_data)
+        read_trans = Thrift::HeaderTransport.new(read_transport)
+
+        expect(read_trans.read(7)).to eq("payload")
+        expect(read_trans.sequence_id).to eq(-2147483648)
+      end
+
       it "should decompress ZLIB payload" do
         # Write with ZLIB
         @trans.add_transform(Thrift::HeaderTransformID::ZLIB)
@@ -223,6 +701,54 @@ describe 'HeaderTransport' do
     end
 
     describe "header parsing protections" do
+      it "rejects frame sizes shorter than a protocol signature" do
+        (0..3).each do |frame_size|
+          frame = [frame_size].pack("N") + ("\x00" * frame_size)
+          read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(frame))
+
+          expect { read_trans.read(1) }.to raise_error(
+            Thrift::TransportException,
+            "Frame size #{frame_size} is too small",
+          ) do |error|
+            expect(error.type).to eq(Thrift::TransportException::UNKNOWN)
+          end
+        end
+      end
+
+      it "reports EOF when the frame size is fragmented" do
+        (0..3).each do |available_size|
+          read_trans = Thrift::HeaderTransport.new(
+            Thrift::MemoryBufferTransport.new("\x00" * available_size),
+          )
+
+          expect { read_trans.read(1) }.to raise_error(
+            Thrift::TransportException,
+            "Unexpected EOF reading frame size",
+          ) do |error|
+            expect(error.type).to eq(Thrift::TransportException::END_OF_FILE)
+          end
+        end
+      end
+
+      it "reports EOF when the declared frame is fragmented" do
+        frame = [4].pack("N") + "\x80\x01\x00".b
+        read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new(frame))
+
+        expect { read_trans.read(1) }.to raise_error(
+          Thrift::TransportException,
+          "Unexpected EOF reading frame",
+        ) do |error|
+          expect(error.type).to eq(Thrift::TransportException::END_OF_FILE)
+        end
+      end
+
+      it "accepts a four-byte framed binary protocol signature" do
+        payload = [Thrift::BinaryProtocol::VERSION_1 | Thrift::MessageTypes::CALL].pack("N")
+        read_trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new([payload.bytesize].pack("N") + payload))
+
+        expect(read_trans.read(payload.bytesize)).to eq(payload)
+      end
+
       it "should reject unreasonable header sizes" do
         frame = build_header_frame("", Thrift::Bytes.empty_byte_buffer, header_words: 16_384)
         read_transport = Thrift::MemoryBufferTransport.new(frame)
@@ -233,11 +759,11 @@ describe 'HeaderTransport' do
 
       it "should reject header frames that are too small" do
         frame = Thrift::Bytes.empty_byte_buffer
-        frame << [9].pack('N')
-        frame << [Thrift::HeaderTransport::HEADER_MAGIC].pack('n')
-        frame << [0].pack('n')
-        frame << [0].pack('N')
-        frame << [0].pack('n')
+        frame << [9].pack("N")
+        frame << [Thrift::HeaderTransport::HEADER_MAGIC].pack("n")
+        frame << [0].pack("n")
+        frame << [0].pack("N")
+        frame << [0].pack("n")
         read_transport = Thrift::MemoryBufferTransport.new(frame)
         read_trans = Thrift::HeaderTransport.new(read_transport)
 
@@ -245,12 +771,40 @@ describe 'HeaderTransport' do
       end
 
       it "should reject varints that cross header boundary" do
-        header_data = [0x80, 0x80, 0x80, 0x80].pack('C*')
+        header_data = [0x80, 0x80, 0x80, 0x80].pack("C*")
         frame = build_header_frame(header_data)
         read_transport = Thrift::MemoryBufferTransport.new(frame)
         read_trans = Thrift::HeaderTransport.new(read_transport)
 
         expect { read_trans.read(1) }.to raise_error(Thrift::TransportException, /header boundary/)
+      end
+
+      it "should reject varints longer than uint32" do
+        header_data = "\x80".b * 65_532
+        frame = build_header_frame(header_data)
+        read_transport = Thrift::MemoryBufferTransport.new(frame)
+        read_trans = Thrift::HeaderTransport.new(read_transport)
+
+        expect { read_trans.read(1) }.to raise_error(Thrift::TransportException, /over 5 bytes/)
+      end
+
+      it "should reject uint32 varints with an overflowing fifth byte" do
+        header_data = (([0x80] * 4) + [0x10]).pack("C*")
+        frame = build_header_frame(header_data)
+        read_transport = Thrift::MemoryBufferTransport.new(frame)
+        read_trans = Thrift::HeaderTransport.new(read_transport)
+
+        expect { read_trans.read(1) }.to raise_error(Thrift::TransportException, /overflows uint32/)
+      end
+
+      it "should accept uint32 varints with a valid fifth byte" do
+        header_data = (([0x80] * 4) + [0x0f, 0]).pack("C*")
+        frame = build_header_frame(header_data)
+        read_transport = Thrift::MemoryBufferTransport.new(frame)
+        read_trans = Thrift::HeaderTransport.new(read_transport)
+
+        expect(read_trans.read(1)).to eq(Thrift::Bytes.empty_byte_buffer)
+        expect(read_trans.protocol_id).to eq(0xf0000000)
       end
 
       it "should reject strings that exceed header boundary" do
@@ -328,8 +882,8 @@ describe 'HeaderTransport' do
         allowed = [Thrift::HeaderClientType::HEADERS]
 
         # Create framed binary message
-        payload = [Thrift::BinaryProtocol::VERSION_1 | Thrift::MessageTypes::CALL].pack('N')
-        frame = [payload.bytesize].pack('N') + payload
+        payload = [Thrift::BinaryProtocol::VERSION_1 | Thrift::MessageTypes::CALL].pack("N")
+        frame = [payload.bytesize].pack("N") + payload
 
         read_transport = Thrift::MemoryBufferTransport.new(frame)
         read_trans = Thrift::HeaderTransport.new(read_transport, allowed)
@@ -359,6 +913,74 @@ describe 'HeaderTransport' do
       result = factory.get_transport(mock_transport)
 
       expect(result).to be_a(Thrift::HeaderTransport)
+    end
+  end
+
+  describe "varint encoding" do
+    it "encodes a negative value as a canonical uint32 varint and round-trips" do
+      require "stringio"
+      require "timeout"
+      trans = Thrift::HeaderTransport.new(Thrift::MemoryBufferTransport.new)
+      io = StringIO.new("".b)
+      # A negative argument must not spin the encoder: it is encoded as its low
+      # 32 bits, which is the same byte sequence 0xFFFFFFFF produces and which
+      # read_varint32 accepts. The timeout guards against the non-terminating loop.
+      Timeout.timeout(5) { trans.send(:write_varint32, io, -1) }
+      expect(io.string.bytes).to eq([0xFF, 0xFF, 0xFF, 0xFF, 0x0F])
+
+      io.rewind
+      expect(trans.send(:read_varint32, io)).to eq(0xFFFFFFFF)
+    end
+  end
+
+  context "input lifetime" do
+    it "releases compressed and plain payloads without consuming the next frame or reply metadata" do
+      wire = Thrift::MemoryBufferTransport.new
+      writer = Thrift::HeaderTransport.new(wire)
+      writer.sequence_id = 42
+      writer.set_header("name", "value")
+      writer.write("x" * 32_768)
+      writer.flush
+      writer.add_transform(Thrift::HeaderTransformID::ZLIB)
+      writer.sequence_id = 43
+      writer.set_header("second", "frame")
+      writer.write("y" * 32_768)
+      writer.flush
+
+      reader = Thrift::HeaderTransport.new(wire)
+      expect(reader.read_all(32_768)).to eq("x" * 32_768)
+      expect(reader.instance_variable_get(:@read_buffer).string).to be_empty
+      expect(reader.get_headers).to eq("name" => "value")
+      expect(reader.sequence_id).to eq(42)
+      expect(wire.available).to be > 0
+      reader.reset_protocol
+      expect(reader.sequence_id).to eq(43)
+      expect(reader.read_all(32_768)).to eq("y" * 32_768)
+      expect(reader.instance_variable_get(:@read_buffer).string).to be_empty
+      expect(reader.get_headers).to eq("second" => "frame")
+    end
+
+    it "reads unsigned bytes across frame boundaries while preserving reply metadata" do
+      wire = Thrift::MemoryBufferTransport.new
+      writer = Thrift::HeaderTransport.new(wire)
+      writer.sequence_id = 42
+      writer.set_header("name", "first")
+      writer.write("\x00\x80\xff".b)
+      writer.flush
+      writer.sequence_id = 43
+      writer.set_header("name", "second")
+      writer.write("\x81".b)
+      writer.flush
+
+      reader = Thrift::HeaderTransport.new(wire)
+      expect(Array.new(3) { reader.read_byte }).to eq([0, 128, 255])
+      expect(reader.instance_variable_get(:@read_buffer).string).to be_empty
+      expect(reader.get_headers).to eq("name" => "first")
+      expect(reader.sequence_id).to eq(42)
+      expect(reader.read_byte).to eq(129)
+      expect(reader.instance_variable_get(:@read_buffer).string).to be_empty
+      expect(reader.get_headers).to eq("name" => "second")
+      expect(reader.sequence_id).to eq(43)
     end
   end
 end

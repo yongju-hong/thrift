@@ -20,7 +20,7 @@
 namespace cpp fuzz
 namespace java org.apache.thrift.fuzz
 namespace py fuzz
-namespace swift Fuzz
+namespace rb Fuzz
 
 // Test typedefs
 typedef i64 UserId
