@@ -23,7 +23,11 @@
 #include <sstream>
 #include <thrift/protocol/TJSONProtocol.h>
 #include <memory>
+#include <string>
+#include <thrift/TConfiguration.h>
 #include <thrift/transport/TBufferTransports.h>
+#include <thrift/transport/TTransportException.h>
+#include <thrift/transport/TVirtualTransport.h>
 #include "gen-cpp/DebugProtoTest_types.h"
 
 #define BOOST_TEST_MODULE JSONProtoTest
@@ -401,4 +405,139 @@ BOOST_AUTO_TEST_CASE(test_json_base64_padding_validation) {
   // Malformed base64 with excessive padding (processed conservatively)
   test_base64_padding("===");
   test_base64_padding("====");
+}
+
+// A single JSON string is quote-delimited, so unlike a length-prefixed binary
+// string there is no declared size to reject up front. readJSONString() must
+// therefore bound the string it decodes against the configured MaxMessageSize:
+// a string within the limit is still read, but one larger than the limit is
+// rejected rather than grown without bound.
+BOOST_AUTO_TEST_CASE(test_json_string_respects_max_message_size) {
+  const int kMaxMessageSize = 1024;
+
+  // A string comfortably under the limit is accepted unchanged.
+  {
+    auto config = std::make_shared<TConfiguration>(kMaxMessageSize);
+    std::string json = "\"" + std::string(kMaxMessageSize / 2, 'A') + "\"";
+    auto buffer = std::make_shared<TMemoryBuffer>(reinterpret_cast<uint8_t*>(&json[0]),
+                                                  static_cast<uint32_t>(json.size()),
+                                                  TMemoryBuffer::COPY,
+                                                  config);
+    auto proto = std::make_shared<TJSONProtocol>(buffer);
+    std::string out;
+    BOOST_CHECK_NO_THROW(proto->readString(out));
+    BOOST_CHECK_EQUAL(out.size(), static_cast<size_t>(kMaxMessageSize / 2));
+  }
+
+  // A single string larger than the configured limit is rejected.
+  {
+    auto config = std::make_shared<TConfiguration>(kMaxMessageSize);
+    std::string json = "\"" + std::string(kMaxMessageSize * 2, 'A') + "\"";
+    auto buffer = std::make_shared<TMemoryBuffer>(reinterpret_cast<uint8_t*>(&json[0]),
+                                                  static_cast<uint32_t>(json.size()),
+                                                  TMemoryBuffer::COPY,
+                                                  config);
+    auto proto = std::make_shared<TJSONProtocol>(buffer);
+    std::string out;
+    BOOST_CHECK_THROW(proto->readString(out),
+                      apache::thrift::transport::TTransportException);
+  }
+}
+
+// The same char-by-char, no-declared-length reasoning applies to numeric
+// literals via readJSONNumericChars(): an over-long numeric run must also be
+// bounded by the configured MaxMessageSize.
+BOOST_AUTO_TEST_CASE(test_json_number_respects_max_message_size) {
+  const int kMaxMessageSize = 1024;
+  auto config = std::make_shared<TConfiguration>(kMaxMessageSize);
+  // Terminate the numeric run with a non-numeric byte so that, without the
+  // size bound, readJSONNumericChars() stops cleanly (rather than throwing on
+  // buffer exhaustion) and the test isolates the MaxMessageSize check itself.
+  std::string json = std::string(kMaxMessageSize * 2, '1') + " ";
+  auto buffer = std::make_shared<TMemoryBuffer>(reinterpret_cast<uint8_t*>(&json[0]),
+                                                static_cast<uint32_t>(json.size()),
+                                                TMemoryBuffer::COPY,
+                                                config);
+  auto proto = std::make_shared<TJSONProtocol>(buffer);
+  int64_t out = 0;
+  BOOST_CHECK_THROW(proto->readI64(out), apache::thrift::transport::TTransportException);
+}
+
+// TMemoryBuffer checks the message size budget but never draws it down, so the
+// tests above cannot tell a bound against the configured maximum apart from one
+// against the size still remaining -- on such a transport the two are the same
+// thing. TZlibTransport::read() does draw the budget down as bytes are consumed;
+// this stand-in reproduces that accounting without adding a zlib dependency to
+// this test.
+class TCountingTransport
+    : public apache::thrift::transport::TVirtualTransport<TCountingTransport> {
+public:
+  TCountingTransport(std::shared_ptr<apache::thrift::transport::TTransport> inner,
+                     std::shared_ptr<TConfiguration> config)
+    : TVirtualTransport(config), inner_(inner) {}
+
+  uint32_t read(uint8_t* buf, uint32_t len) {
+    checkReadBytesAvailable(len);
+    uint32_t got = inner_->read(buf, len);
+    countConsumedMessageBytes(got);
+    return got;
+  }
+
+  void write(const uint8_t* buf, uint32_t len) { inner_->write(buf, len); }
+  bool isOpen() const override { return inner_->isOpen(); }
+  void open() override { inner_->open(); }
+  void close() override { inner_->close(); }
+
+private:
+  std::shared_ptr<apache::thrift::transport::TTransport> inner_;
+};
+
+static std::shared_ptr<TJSONProtocol> countingProtoReading(const std::string& json,
+                                                           std::shared_ptr<TConfiguration> config) {
+  auto buffer = std::make_shared<TMemoryBuffer>(
+      reinterpret_cast<uint8_t*>(const_cast<char*>(json.data())),
+      static_cast<uint32_t>(json.size()), TMemoryBuffer::COPY, config);
+  auto transport = std::make_shared<TCountingTransport>(buffer, config);
+  return std::make_shared<TJSONProtocol>(transport);
+}
+
+// The size of a field must be measured against the configured maximum, not
+// against whatever is left of the message budget: a transport that draws the
+// budget down as it reads has already accounted for those same bytes, and
+// counting them a second time rejects strings well inside the limit.
+BOOST_AUTO_TEST_CASE(test_json_string_size_measured_against_configured_maximum) {
+  const int kMaxMessageSize = 1024;
+  const size_t kStringSize = kMaxMessageSize * 3 / 4; // inside the limit, past half of it
+
+  // Within the limit: must be read, even though the transport has drawn the
+  // remaining budget down by the same bytes as they arrived.
+  {
+    auto config = std::make_shared<TConfiguration>(kMaxMessageSize);
+    auto proto = countingProtoReading("\"" + std::string(kStringSize, 'A') + "\"", config);
+    std::string out;
+    BOOST_CHECK_NO_THROW(proto->readString(out));
+    BOOST_CHECK_EQUAL(out.size(), kStringSize);
+  }
+
+  // Past the limit: still rejected on that same transport.
+  {
+    auto config = std::make_shared<TConfiguration>(kMaxMessageSize);
+    auto proto
+        = countingProtoReading("\"" + std::string(kMaxMessageSize * 2, 'A') + "\"", config);
+    std::string out;
+    BOOST_CHECK_THROW(proto->readString(out), apache::thrift::transport::TTransportException);
+  }
+}
+
+// readJSONNumericChars() counts the same way and needs the same treatment.
+BOOST_AUTO_TEST_CASE(test_json_number_size_measured_against_configured_maximum) {
+  const int kMaxMessageSize = 40;
+  const size_t kDigits = 24; // inside the limit, past half of it
+
+  auto config = std::make_shared<TConfiguration>(kMaxMessageSize);
+  // Terminated by a non-numeric byte so the numeric run ends on the terminator
+  // rather than on buffer exhaustion, isolating the size check itself.
+  auto proto = countingProtoReading(std::string(kDigits, '1') + " ", config);
+  double out = 0;
+  BOOST_CHECK_NO_THROW(proto->readDouble(out));
 }

@@ -31,12 +31,58 @@ VALUE rb_thrift_binary_proto_native_qmark(VALUE self) {
   return Qtrue;
 }
 
-
-
 static int VERSION_1;
 static int VERSION_MASK;
 static int TYPE_MASK;
 static ID rbuf_ivar_id;
+
+static int64_t checked_integer_value(VALUE value) {
+  if (!RB_INTEGER_TYPE_P(value)) {
+    rb_raise(rb_eTypeError, "integer argument expected");
+  }
+
+  return NUM2LL(value);
+}
+
+static int64_t checked_integer_range(VALUE value, int64_t min, int64_t max) {
+  int64_t integer = checked_integer_value(value);
+
+  if (integer < min || integer > max) {
+    rb_raise(rb_eRangeError, "integer out of bounds");
+  }
+
+  return integer;
+}
+
+static int8_t checked_byte_value(VALUE value) {
+  return (int8_t)checked_integer_range(value, INT8_MIN, INT8_MAX);
+}
+
+static int16_t checked_i16_value(VALUE value) {
+  return (int16_t)checked_integer_range(value, INT16_MIN, INT16_MAX);
+}
+
+static int32_t checked_i32_value(VALUE value) {
+  return (int32_t)checked_integer_range(value, INT32_MIN, INT32_MAX);
+}
+
+static int32_t checked_size_value(VALUE value) {
+  return (int32_t)checked_integer_range(value, 0, INT32_MAX);
+}
+
+static int64_t checked_i64_value(VALUE value) {
+  return checked_integer_range(value, INT64_MIN, INT64_MAX);
+}
+
+static int32_t checked_string_length(VALUE str) {
+  long length = RSTRING_LEN(str);
+
+  if (length > INT32_MAX) {
+    rb_raise(rb_eRangeError, "string too long");
+  }
+
+  return (int32_t)length;
+}
 
 static void write_byte_direct(VALUE trans, int8_t b) {
   WRITE(trans, (char*)&b, 1);
@@ -83,7 +129,7 @@ static void write_string_direct(VALUE trans, VALUE str) {
     rb_raise(rb_eStandardError, "Value should be a string");
   }
   str = convert_to_utf8_byte_buffer(str);
-  write_i32_direct(trans, (int32_t)RSTRING_LEN(str));
+  write_i32_direct(trans, checked_string_length(str));
   rb_funcall(trans, write_method_id, 1, str);
 }
 
@@ -122,15 +168,17 @@ VALUE rb_thrift_binary_proto_write_set_end(VALUE self) {
 VALUE rb_thrift_binary_proto_write_message_begin(VALUE self, VALUE name, VALUE type, VALUE seqid) {
   VALUE trans = GET_TRANSPORT(self);
   VALUE strict_write = GET_STRICT_WRITE(self);
+  int32_t sequence_id = checked_i32_value(seqid);
 
   if (strict_write == Qtrue) {
-    write_i32_direct(trans, VERSION_1 | FIX2INT(type));
+    int8_t message_type = checked_byte_value(type);
+    write_i32_direct(trans, VERSION_1 | message_type);
     write_string_direct(trans, name);
-    write_i32_direct(trans, FIX2INT(seqid));
+    write_i32_direct(trans, sequence_id);
   } else {
     write_string_direct(trans, name);
-    write_byte_direct(trans, FIX2INT(type));
-    write_i32_direct(trans, FIX2INT(seqid));
+    write_byte_direct(trans, checked_byte_value(type));
+    write_i32_direct(trans, sequence_id);
   }
 
   return Qnil;
@@ -138,8 +186,9 @@ VALUE rb_thrift_binary_proto_write_message_begin(VALUE self, VALUE name, VALUE t
 
 VALUE rb_thrift_binary_proto_write_field_begin(VALUE self, VALUE name, VALUE type, VALUE id) {
   VALUE trans = GET_TRANSPORT(self);
-  write_byte_direct(trans, FIX2INT(type));
-  write_i16_direct(trans, FIX2INT(id));
+  int16_t field_id = checked_i16_value(id);
+  write_byte_direct(trans, checked_byte_value(type));
+  write_i16_direct(trans, field_id);
 
   return Qnil;
 }
@@ -151,17 +200,19 @@ VALUE rb_thrift_binary_proto_write_field_stop(VALUE self) {
 
 VALUE rb_thrift_binary_proto_write_map_begin(VALUE self, VALUE ktype, VALUE vtype, VALUE size) {
   VALUE trans = GET_TRANSPORT(self);
-  write_byte_direct(trans, FIX2INT(ktype));
-  write_byte_direct(trans, FIX2INT(vtype));
-  write_i32_direct(trans, FIX2INT(size));
+  int32_t map_size = checked_size_value(size);
+  write_byte_direct(trans, checked_byte_value(ktype));
+  write_byte_direct(trans, checked_byte_value(vtype));
+  write_i32_direct(trans, map_size);
 
   return Qnil;
 }
 
 VALUE rb_thrift_binary_proto_write_list_begin(VALUE self, VALUE etype, VALUE size) {
   VALUE trans = GET_TRANSPORT(self);
-  write_byte_direct(trans, FIX2INT(etype));
-  write_i32_direct(trans, FIX2INT(size));
+  int32_t list_size = checked_size_value(size);
+  write_byte_direct(trans, checked_byte_value(etype));
+  write_i32_direct(trans, list_size);
 
   return Qnil;
 }
@@ -177,26 +228,22 @@ VALUE rb_thrift_binary_proto_write_bool(VALUE self, VALUE b) {
 }
 
 VALUE rb_thrift_binary_proto_write_byte(VALUE self, VALUE byte) {
-  CHECK_NIL(byte);
-  write_byte_direct(GET_TRANSPORT(self), NUM2INT(byte));
+  write_byte_direct(GET_TRANSPORT(self), checked_byte_value(byte));
   return Qnil;
 }
 
 VALUE rb_thrift_binary_proto_write_i16(VALUE self, VALUE i16) {
-  CHECK_NIL(i16);
-  write_i16_direct(GET_TRANSPORT(self), FIX2INT(i16));
+  write_i16_direct(GET_TRANSPORT(self), checked_i16_value(i16));
   return Qnil;
 }
 
 VALUE rb_thrift_binary_proto_write_i32(VALUE self, VALUE i32) {
-  CHECK_NIL(i32);
-  write_i32_direct(GET_TRANSPORT(self), NUM2INT(i32));
+  write_i32_direct(GET_TRANSPORT(self), checked_i32_value(i32));
   return Qnil;
 }
 
 VALUE rb_thrift_binary_proto_write_i64(VALUE self, VALUE i64) {
-  CHECK_NIL(i64);
-  write_i64_direct(GET_TRANSPORT(self), NUM2LL(i64));
+  write_i64_direct(GET_TRANSPORT(self), checked_i64_value(i64));
   return Qnil;
 }
 
@@ -224,7 +271,7 @@ VALUE rb_thrift_binary_proto_write_binary(VALUE self, VALUE buf) {
   CHECK_NIL(buf);
   VALUE trans = GET_TRANSPORT(self);
   buf = force_binary_encoding(buf);
-  write_i32_direct(trans, (int32_t)RSTRING_LEN(buf));
+  write_i32_direct(trans, checked_string_length(buf));
   rb_funcall(trans, write_method_id, 1, buf);
   return Qnil;
 }
@@ -284,33 +331,62 @@ static char read_byte_direct(VALUE self) {
   return (char)(FIX2INT(byte));
 }
 
+static int16_t uint16_to_int16(uint16_t value) {
+  if (value <= INT16_MAX) {
+    return (int16_t)value;
+  }
+  return (int16_t)((int32_t)value - ((int32_t)UINT16_MAX + 1));
+}
+
+static int32_t uint32_to_int32(uint32_t value) {
+  if (value <= INT32_MAX) {
+    return (int32_t)value;
+  }
+  return (int32_t)((int64_t)value - (INT64_C(1) << 32));
+}
+
+static int64_t uint64_to_int64(uint64_t value) {
+  if (value <= INT64_MAX) {
+    return (int64_t)value;
+  }
+  return -(int64_t)(~value) - INT64_C(1);
+}
+
 static int16_t read_i16_direct(VALUE self) {
   VALUE rbuf = rb_ivar_get(self, rbuf_ivar_id);
   rb_funcall(GET_TRANSPORT(self), read_into_buffer_method_id, 2, rbuf, INT2FIX(2));
-  return (int16_t)(((uint8_t)(RSTRING_PTR(rbuf)[1])) | ((uint16_t)((RSTRING_PTR(rbuf)[0]) << 8)));
+  const uint8_t* bytes = (const uint8_t*)RSTRING_PTR(rbuf);
+  uint16_t value = ((uint16_t)bytes[0] << 8) | (uint16_t)bytes[1];
+  return uint16_to_int16(value);
 }
 
 static int32_t read_i32_direct(VALUE self) {
   VALUE rbuf = rb_ivar_get(self, rbuf_ivar_id);
   rb_funcall(GET_TRANSPORT(self), read_into_buffer_method_id, 2, rbuf, INT2FIX(4));
-  return ((uint8_t)(RSTRING_PTR(rbuf)[3])) |
-    (((uint8_t)(RSTRING_PTR(rbuf)[2])) << 8) |
-    (((uint8_t)(RSTRING_PTR(rbuf)[1])) << 16) |
-    (((uint8_t)(RSTRING_PTR(rbuf)[0])) << 24);
+  const uint8_t* bytes = (const uint8_t*)RSTRING_PTR(rbuf);
+  uint32_t value = ((uint32_t)bytes[0] << 24) |
+    ((uint32_t)bytes[1] << 16) |
+    ((uint32_t)bytes[2] << 8) |
+    (uint32_t)bytes[3];
+  return uint32_to_int32(value);
+}
+
+static uint64_t read_u64_direct(VALUE self) {
+  VALUE rbuf = rb_ivar_get(self, rbuf_ivar_id);
+  rb_funcall(GET_TRANSPORT(self), read_into_buffer_method_id, 2, rbuf, INT2FIX(8));
+  const uint8_t* bytes = (const uint8_t*)RSTRING_PTR(rbuf);
+  return ((uint64_t)bytes[0] << 56) |
+    ((uint64_t)bytes[1] << 48) |
+    ((uint64_t)bytes[2] << 40) |
+    ((uint64_t)bytes[3] << 32) |
+    ((uint64_t)bytes[4] << 24) |
+    ((uint64_t)bytes[5] << 16) |
+    ((uint64_t)bytes[6] << 8) |
+    (uint64_t)bytes[7];
 }
 
 static int64_t read_i64_direct(VALUE self) {
-  VALUE rbuf = rb_ivar_get(self, rbuf_ivar_id);
-  rb_funcall(GET_TRANSPORT(self), read_into_buffer_method_id, 2, rbuf, INT2FIX(8));
-  uint64_t hi = ((uint8_t)(RSTRING_PTR(rbuf)[3])) |
-    (((uint8_t)(RSTRING_PTR(rbuf)[2])) << 8) |
-    (((uint8_t)(RSTRING_PTR(rbuf)[1])) << 16) |
-    (((uint8_t)(RSTRING_PTR(rbuf)[0])) << 24);
-  uint32_t lo = ((uint8_t)(RSTRING_PTR(rbuf)[7])) |
-    (((uint8_t)(RSTRING_PTR(rbuf)[6])) << 8) |
-    (((uint8_t)(RSTRING_PTR(rbuf)[5])) << 16) |
-    (((uint8_t)(RSTRING_PTR(rbuf)[4])) << 24);
-  return (hi << 32) | lo;
+  return uint64_to_int64(read_u64_direct(self));
 }
 
 VALUE rb_thrift_binary_proto_read_message_end(VALUE self) {
@@ -346,6 +422,10 @@ VALUE rb_thrift_binary_proto_read_message_begin(VALUE self) {
   VALUE name, seqid;
   int type;
 
+  if (RTEST(rb_ivar_get(self, reset_message_size_ivar_id))) {
+    rb_funcall(GET_TRANSPORT(self), reset_message_size_method_id, 0);
+  }
+
   int version = read_i32_direct(self);
 
   if (version < 0) {
@@ -359,6 +439,7 @@ VALUE rb_thrift_binary_proto_read_message_begin(VALUE self) {
     if (strict_read == Qtrue) {
       rb_exc_raise(get_protocol_exception(INT2FIX(PROTOERR_BAD_VERSION), rb_str_new2("No version identifier, old protocol client?")));
     }
+    CHECK_STRING_SIZE(self, version);
     name = READ(self, version);
     type = read_byte_direct(self);
     seqid = rb_thrift_binary_proto_read_i32(self);
@@ -377,17 +458,24 @@ VALUE rb_thrift_binary_proto_read_field_begin(VALUE self) {
   }
 }
 
+#define CHECK_NEGATIVE_SIZE(size) \
+  if (RB_UNLIKELY((size) < 0)) { \
+    rb_exc_raise(get_protocol_exception(INT2FIX(PROTOERR_NEGATIVE_SIZE), rb_str_new2("Negative size"))); \
+  }
+
 VALUE rb_thrift_binary_proto_read_map_begin(VALUE self) {
   VALUE ktype = rb_thrift_binary_proto_read_byte(self);
   VALUE vtype = rb_thrift_binary_proto_read_byte(self);
-  VALUE size = rb_thrift_binary_proto_read_i32(self);
-  return rb_ary_new3(3, ktype, vtype, size);
+  int size = read_i32_direct(self);
+  CHECK_NEGATIVE_SIZE(size);
+  return rb_ary_new3(3, ktype, vtype, INT2NUM(size));
 }
 
 VALUE rb_thrift_binary_proto_read_list_begin(VALUE self) {
   VALUE etype = rb_thrift_binary_proto_read_byte(self);
-  VALUE size = rb_thrift_binary_proto_read_i32(self);
-  return rb_ary_new3(2, etype, size);
+  int size = read_i32_direct(self);
+  CHECK_NEGATIVE_SIZE(size);
+  return rb_ary_new3(2, etype, INT2NUM(size));
 }
 
 VALUE rb_thrift_binary_proto_read_set_begin(VALUE self) {
@@ -418,9 +506,9 @@ VALUE rb_thrift_binary_proto_read_i64(VALUE self) {
 VALUE rb_thrift_binary_proto_read_double(VALUE self) {
   union {
     double f;
-    int64_t t;
+    uint64_t t;
   } transfer;
-  transfer.t = read_i64_direct(self);
+  transfer.t = read_u64_direct(self);
   return rb_float_new(transfer.f);
 }
 
@@ -431,6 +519,8 @@ VALUE rb_thrift_binary_proto_read_string(VALUE self) {
 
 VALUE rb_thrift_binary_proto_read_binary(VALUE self) {
   int size = read_i32_direct(self);
+  CHECK_NEGATIVE_SIZE(size);
+  CHECK_STRING_SIZE(self, size);
   return READ(self, size);
 }
 

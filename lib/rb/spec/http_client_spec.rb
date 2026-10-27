@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -17,17 +18,37 @@
 # under the License.
 #
 
-require 'spec_helper'
+require "spec_helper"
+require "timeout"
+require "weakref"
 
-describe 'Thrift::HTTPClientTransport' do
-
+describe "Thrift::HTTPClientTransport" do
   describe Thrift::HTTPClientTransport do
     before(:each) do
       @client = Thrift::HTTPClientTransport.new("http://my.domain.com/path/to/service?param=value")
     end
-    
+
     it "should provide a reasonable to_s" do
-      @client.to_s == "http://my.domain.com/path/to/service?param=value"
+      expect(@client.to_s).to eq("http(my.domain.com:80/path/to/service)")
+    end
+
+    it "should include the root path in its endpoint label" do
+      client = Thrift::HTTPClientTransport.new("http://my.domain.com")
+
+      expect(client.to_s).to eq("http(my.domain.com:80/)")
+    end
+
+    it "should distinguish an IPv6 host from its port" do
+      client = Thrift::HTTPClientTransport.new("https://[2001:db8::1]:8443/path/to/service")
+
+      expect(client.to_s).to eq("https([2001:db8::1]:8443/path/to/service)")
+    end
+
+    it "should not include userinfo in its endpoint label" do
+      client = Thrift::HTTPClientTransport.new("https://user:secret@my.domain.com/path/to/service?token=secret")
+
+      expect(client.to_s).to eq("https(my.domain.com:443/path/to/service)")
+      expect(client.to_s).not_to include("user", "secret", "token")
     end
 
     it "should always be open" do
@@ -54,6 +75,57 @@ describe 'Thrift::HTTPClientTransport' do
       expect(@client.read(10)).to eq("data")
     end
 
+    it "should report successful HTTP responses without a Thrift payload when read" do
+      {"204" => nil, "200" => ""}.each do |status, body|
+        client = Thrift::HTTPClientTransport.new("http://my.domain.com/service")
+        client.write("request")
+        http = instance_double(Net::HTTP)
+        response = instance_double(Net::HTTPResponse, code: status, body: body)
+
+        expect(Net::HTTP).to receive(:new).with("my.domain.com", 80).and_return(http)
+        expect(http).to receive(:use_ssl=).with(false)
+        expect(http).to receive(:post).with("/service", "request", {"Content-Type" => "application/x-thrift"}).and_return(response)
+
+        expect { client.flush }.not_to raise_error
+        expect { client.read_all(1) }.to raise_error(Thrift::TransportException) do |error|
+          expect(error.type).to eq(Thrift::TransportException::END_OF_FILE)
+          expect(error.message).to eq("Thrift::HTTPClientTransport reached EOF reading response from http(my.domain.com:80/service), HTTP status code #{status}")
+        end
+      end
+    end
+
+    it "should allow oneway calls with successful empty HTTP responses" do
+      {"200" => "", "204" => nil}.each do |status, body|
+        transport = Thrift::HTTPClientTransport.new("http://my.domain.com/service")
+        client = SpecNamespace::NonblockingService::Client.new(Thrift::BinaryProtocol.new(transport))
+        http = instance_double(Net::HTTP)
+        response = instance_double(Net::HTTPResponse, code: status, body: body)
+
+        expect(Net::HTTP).to receive(:new).with("my.domain.com", 80).and_return(http)
+        expect(http).to receive(:use_ssl=).with(false)
+        expect(http).to receive(:post).with("/service", kind_of(String), {"Content-Type" => "application/x-thrift"}).and_return(response)
+
+        expect { client.shutdown }.not_to raise_error
+      end
+    end
+
+    it "should include a safe endpoint and status in empty response errors" do
+      client = Thrift::HTTPClientTransport.new("https://user:secret@my.domain.com/service?token=secret")
+      client.write("request")
+      http = instance_double(Net::HTTP)
+      response = instance_double(Net::HTTPNoContent, code: "204", body: nil)
+
+      expect(Net::HTTP).to receive(:new).with("my.domain.com", 443).and_return(http)
+      expect(http).to receive(:use_ssl=).with(true)
+      expect(http).to receive(:verify_mode=).with(OpenSSL::SSL::VERIFY_PEER)
+      expect(http).to receive(:post).with("/service?token=secret", "request", {"Content-Type" => "application/x-thrift"}).and_return(response)
+
+      expect { client.flush }.not_to raise_error
+      expect { client.read_all(1) }.to raise_error(Thrift::TransportException) do |error|
+        expect(error.message).to eq("Thrift::HTTPClientTransport reached EOF reading response from https(my.domain.com:443/service), HTTP status code 204")
+      end
+    end
+
     it "should send custom headers if defined" do
       @client.write "test"
       custom_headers = {"Cookie" => "Foo"}
@@ -74,7 +146,7 @@ describe 'Thrift::HTTPClientTransport' do
       @client.flush
     end
 
-    it 'should reset the outbuf on HTTP failures' do
+    it "should reset the outbuf on HTTP failures" do
       @client.write "test"
 
       expect(Net::HTTP).to receive(:new).with("my.domain.com", 80) do
@@ -84,11 +156,11 @@ describe 'Thrift::HTTPClientTransport' do
         end
       end
 
-      @client.flush  rescue
+      expect { @client.flush }.to raise_error(Net::ReadTimeout)
       expect(@client.instance_variable_get(:@outbuf)).to eq(Thrift::Bytes.empty_byte_buffer)
     end
 
-    it 'should raise TransportError on HTTP failures' do
+    it "should raise TransportError on HTTP failures" do
       @client.write "test"
 
       expect(Net::HTTP).to receive(:new).with("my.domain.com", 80) do
@@ -106,9 +178,25 @@ describe 'Thrift::HTTPClientTransport' do
       expect { @client.flush }.to raise_error(Thrift::TransportException)
     end
 
+    it "should omit URL secrets from HTTP failure messages" do
+      client = Thrift::HTTPClientTransport.new("https://user:secret@my.domain.com/path/to/service?token=secret")
+      client.write "test"
+      http = double("Net::HTTP")
+      response = double("HTTP response", code: "503")
+
+      expect(Net::HTTP).to receive(:new).with("my.domain.com", 443).and_return(http)
+      expect(http).to receive(:use_ssl=).with(true)
+      expect(http).to receive(:verify_mode=).with(OpenSSL::SSL::VERIFY_PEER)
+      expect(http).to receive(:post).with("/path/to/service?token=secret", "test", {"Content-Type" => "application/x-thrift"}).and_return(response)
+
+      expect { client.flush }.to raise_error(Thrift::TransportException) do |error|
+        expect(error.message).to include("https(my.domain.com:443/path/to/service)")
+        expect(error.message).not_to include("user", "secret", "token")
+      end
+    end
   end
 
-  describe 'ssl enabled' do
+  describe "ssl enabled" do
     before(:each) do
       @service_path = "/path/to/service?param=value"
       @server_uri = "https://my.domain.com"
@@ -123,8 +211,10 @@ describe 'Thrift::HTTPClientTransport' do
         double("Net::HTTP").tap do |http|
           expect(http).to receive(:use_ssl=).with(true)
           expect(http).to receive(:verify_mode=).with(OpenSSL::SSL::VERIFY_PEER)
-          expect(http).to receive(:post).with(@service_path, "test",
-              {"Content-Type" => "application/x-thrift"}) do
+          expect(http).to receive(:post).with(
+            @service_path, "test",
+            {"Content-Type" => "application/x-thrift"},
+          ) do
             double("Net::HTTPOK").tap do |response|
               expect(response).to receive(:body).and_return "data"
               expect(response).to receive(:code).and_return "200"
@@ -137,16 +227,17 @@ describe 'Thrift::HTTPClientTransport' do
     end
 
     it "should set SSL verify mode when specified" do
-      client = Thrift::HTTPClientTransport.new("#{@server_uri}#{@service_path}",
-          :ssl_verify_mode => OpenSSL::SSL::VERIFY_NONE)
+      client = Thrift::HTTPClientTransport.new("#{@server_uri}#{@service_path}", {ssl_verify_mode: OpenSSL::SSL::VERIFY_NONE})
 
       client.write "test"
       expect(Net::HTTP).to receive(:new).with("my.domain.com", 443) do
         double("Net::HTTP").tap do |http|
           expect(http).to receive(:use_ssl=).with(true)
           expect(http).to receive(:verify_mode=).with(OpenSSL::SSL::VERIFY_NONE)
-          expect(http).to receive(:post).with(@service_path, "test",
-              {"Content-Type" => "application/x-thrift"}) do
+          expect(http).to receive(:post).with(
+            @service_path, "test",
+            {"Content-Type" => "application/x-thrift"},
+          ) do
             double("Net::HTTPOK").tap do |response|
               expect(response).to receive(:body).and_return "data"
               expect(response).to receive(:code).and_return "200"
@@ -156,6 +247,105 @@ describe 'Thrift::HTTPClientTransport' do
       end
       client.flush
       expect(client.read(4)).to eq("data")
+    end
+
+    it "should set the SSL CA file when specified" do
+      client = Thrift::HTTPClientTransport.new("#{@server_uri}#{@service_path}", {ssl_ca_file: "/path/to/ca.pem"})
+
+      client.write "test"
+      expect(Net::HTTP).to receive(:new).with("my.domain.com", 443) do
+        double("Net::HTTP").tap do |http|
+          expect(http).to receive(:use_ssl=).with(true)
+          expect(http).to receive(:verify_mode=).with(OpenSSL::SSL::VERIFY_PEER)
+          expect(http).to receive(:ca_file=).with("/path/to/ca.pem")
+          expect(http).to receive(:post).with(
+            @service_path, "test",
+            {"Content-Type" => "application/x-thrift"},
+          ) do
+            double("Net::HTTPOK").tap do |response|
+              expect(response).to receive(:body).and_return "data"
+              expect(response).to receive(:code).and_return "200"
+            end
+          end
+        end
+      end
+      client.flush
+      expect(client.read(4)).to eq("data")
+    end
+  end
+
+  context "input lifetime" do
+    it "releases real responses while idle and preserves unread data after a failed request" do
+      listener = TCPServer.new("127.0.0.1", 0)
+      server = Thread.new do
+        [200, 503, 200].each_with_index do |status, index|
+          socket = listener.accept
+          begin
+            socket.gets
+            headers = {}
+            while (line = socket.gets) != "\r\n"
+              key, value = line.split(":", 2)
+              headers[key.downcase] = value.strip
+            end
+            socket.read(headers.fetch("content-length", "0").to_i)
+            size = index == 0 ? 32_768 : 4
+            socket.write("HTTP/1.1 #{status} Result\r\nContent-Length: #{size}\r\nConnection: close\r\n\r\n")
+            if index == 0
+              8.times { socket.write("x" * 4096) }
+            else
+              socket.write("next")
+            end
+          ensure
+            socket.close
+          end
+        end
+      end
+
+      client_thread = nil
+      Timeout.timeout(10) do
+        # Discard request/response stack roots before checking transport ownership.
+        client_thread = Thread.new do
+          transport = Thrift::HTTPClientTransport.new("http://127.0.0.1:#{listener.addr[1]}/")
+          transport.write("request")
+          transport.flush
+          expect(transport.read(1)).to eq("x")
+          reference = WeakRef.new(transport.instance_variable_get(:@inbuf).string)
+          transport.close
+          transport.write("request")
+          expect { transport.flush }.to raise_error(Thrift::TransportException, /HTTP status code 503/)
+          7.times { expect(transport.read(4096)).to eq("x" * 4096) }
+          expect(transport.read(4095)).to eq("x" * 4095)
+          [transport, reference]
+        end
+        transport, reference = client_thread.value
+        GC.start
+        expect(transport.instance_variable_get(:@inbuf).string).to be_empty
+        expect(reference.weakref_alive?).to be_falsey
+        expect(transport.read(0)).to eq("")
+        expect { transport.read(1) }.to raise_error(Thrift::TransportException, /HTTP status code 200/)
+        transport.write("request")
+        transport.flush
+        expect(transport.read_all(4)).to eq("next")
+        transport.close
+        expect(transport.instance_variable_get(:@inbuf).string).to be_empty
+        server.value
+      end
+    ensure
+      client_thread.kill.join if client_thread && client_thread.alive?
+      server.kill.join if server && server.alive?
+      listener.close if listener
+    end
+
+    it "preserves response status when a byte read reaches EOF" do
+      transport = Thrift::HTTPClientTransport.new("http://localhost/")
+      transport.instance_variable_set(:@inbuf, StringIO.new("\xff".b))
+      transport.instance_variable_set(:@response_code, 206)
+
+      expect(transport.read_byte).to eq(255)
+      expect(transport.instance_variable_get(:@inbuf).string).to be_empty
+      expect { transport.read_byte }.to raise_error(Thrift::TransportException, /HTTP status code 206/) do |error|
+        expect(error.type).to eq(Thrift::TransportException::END_OF_FILE)
+      end
     end
   end
 end

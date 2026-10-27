@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -17,12 +18,19 @@
 # under the License.
 #
 
-if defined?(RUBY_ENGINE) && RUBY_ENGINE =~ /jruby/
-  File.open('Makefile', 'w'){|f| f.puts "all:\n\ninstall:\n" }
+if defined?(RUBY_ENGINE) && RUBY_ENGINE == "jruby"
+  File.open("Makefile", "w") { |f| f.puts "all:\n\ninstall:\n" }
 else
-  require 'mkmf'
+  require "mkmf"
 
   append_cflags(["-fsigned-char", "-g", "-O2", "-Wall", "-Werror", "-Werror=old-style-definition"])
+
+  # clang 21+ introduced -Wdefault-const-init-field-unsafe, which fires on
+  # Ruby 3.2's rstring.h (struct RString has a const field via RBasic).
+  # This is a Ruby header issue, not a Thrift bug, so suppress the warning here.
+  # append_cflags silently ignores flags unsupported by the compiler, so this
+  # is safe across all clang versions.
+  append_cflags("-Wno-default-const-init-field-unsafe")
 
   # Makes all symbols private by default to avoid unintended conflict
   # with other gems. To explicitly export symbols you can use RUBY_FUNC_EXPORTED
@@ -31,5 +39,5 @@ else
 
   have_func("strlcpy", "string.h")
 
-  create_makefile 'thrift_native'
+  create_makefile "thrift_native"
 end

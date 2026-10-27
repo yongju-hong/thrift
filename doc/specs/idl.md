@@ -1,6 +1,6 @@
 ## Thrift interface description language
 
-For Thrift version 0.23.0.
+For Thrift version 0.26.0.
 
 The Thrift interface definition language (IDL) allows for the definition of [Thrift Types](/docs/types). A Thrift IDL file is processed by the Thrift code generator to produce code for the various target languages to support the defined structs and services in the IDL file.
 
@@ -59,6 +59,33 @@ A typedef creates an alternate name for a type.
 An enum creates an enumerated type, with named values. If no constant value is supplied, the value is either 0 for the first element, or one greater than the preceding value for any subsequent element. Any constant value that is supplied must be non-negative.
 
     [10] Enum            ::=  'enum' Identifier '{' (Identifier ('=' IntConstant)? ListSeparator?)* '}'
+
+The `enum.flags` annotation marks an enum as a set of bit flags:
+
+```thrift
+enum Permissions {
+  Read = 1,
+  Write = 2,
+  ReadWrite = 3,
+} (enum.flags)
+```
+
+The C# (`netstd`) generator adds `[Flags]`. The Python generator uses `enum.Flag`,
+or `enum.IntFlag` with `--gen py:enum,type_hints`. Flag enums require Python 3.6
+or later. Unannotated enums keep their existing behavior. The annotation does not
+assign values or check that they are powers of two; zero and composite values are
+allowed. The wire representation remains an `i32`. Python preserves unknown flag
+bits when reading and writing values, allowing peers with different versions of
+an enum to exchange new flags without losing them. Bitwise complement also
+preserves this behavior: `permissions & ~Permissions.Read` clears `Read` without
+removing unknown bits. The complement uses signed integer semantics, so
+`~Permissions.Read` can have a negative value.
+
+Python flag values compare and hash by value (and, for `Flag`, by enum type when
+comparing). Unknown values are not retained in the enum's member cache; use `==`
+rather than `is` to compare them. With `--gen py:enum`, integer arguments to flag
+fields are converted to the enum type in immutable structs and exceptions as
+well as mutable structs.
 
 ### Struct
 
@@ -186,23 +213,27 @@ N.B.: These have some internal purpose at Facebook but serve no current purpose 
 
 ### Literal
 
-    [36] Literal         ::=  ('"' [^"]* '"') | ("'" [^']* "'")
+A literal is enclosed in double or single quotes and cannot contain a line break. Inside a literal, a backslash starts one of the escape sequences listed below; a backslash followed by any other character is an error.
+
+    [36] Literal         ::=  ('"' ( [^"\] | Escape )* '"') | ("'" ( [^'\] | Escape )* "'")
+
+    [37] Escape          ::=  '\' ( '"' | "'" | '\' | 'n' | 'r' | 't' )
 
 ### Identifier
 
-    [37] Identifier      ::=  ( Letter | '_' ) ( Letter | Digit | '.' | '_' )*
+    [38] Identifier      ::=  ( Letter | '_' ) ( Letter | Digit | '.' | '_' )*
 
-    [38] STIdentifier    ::=  ( Letter | '_' ) ( Letter | Digit | '.' | '_' | '-' )*
+    [39] STIdentifier    ::=  ( Letter | '_' ) ( Letter | Digit | '.' | '_' | '-' )*
 
 ### List Separator
 
-    [39] ListSeparator   ::=  ',' | ';'
+    [40] ListSeparator   ::=  ',' | ';'
 
 ### Letters and Digits
 
-    [40] Letter          ::=  ['A'-'Z'] | ['a'-'z']
+    [41] Letter          ::=  ['A'-'Z'] | ['a'-'z']
 
-    [41] Digit           ::=  ['0'-'9']
+    [42] Digit           ::=  ['0'-'9']
 
 ## Reserved keywords
 

@@ -52,8 +52,9 @@ RUN curl https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - &
   /etc/apt/sources.list.d/dart_stable.list
 
 # node.js
-RUN curl -sL https://deb.nodesource.com/gpgkey/nodesource.gpg.key | apt-key add - && \
-  echo "deb https://deb.nodesource.com/node_16.x focal main" | tee /etc/apt/sources.list.d/nodesource.list
+RUN mkdir -p /etc/apt/keyrings && \
+  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
+  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list
 
 ### install general dependencies
 RUN apt-get update -yq && \
@@ -76,14 +77,7 @@ RUN apt-get update -yq && \
   unzip \
   valgrind \
   vim
-ENV PATH /usr/lib/llvm-6.0/bin:$PATH
-
-# lib/as3 (ActionScript)
-RUN mkdir -p /usr/local/adobe/flex/4.6 && \
-  cd /usr/local/adobe/flex/4.6 && \
-  wget -q "http://download.macromedia.com/pub/flex/sdk/flex_sdk_4.6.zip" && \
-  unzip flex_sdk_4.6.zip
-ENV FLEX_HOME /usr/local/adobe/flex/4.6
+ENV PATH=/usr/lib/llvm-6.0/bin:$PATH
 
 # TODO: "apt-get install" without "apt-get update" in the same "RUN" step can cause cache issues if modified later.
 # See https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#run
@@ -95,7 +89,7 @@ RUN apt-get install -y --no-install-recommends \
   qtbase5-dev \
   qtbase5-dev-tools
 
-ENV SBCL_VERSION 1.5.3
+ENV SBCL_VERSION=1.5.3
 RUN \
   `# Common Lisp (sbcl) dependencies` \
   curl --version && \
@@ -107,8 +101,8 @@ RUN \
   cd .. && \
   rm -rf sbcl*
 
-ENV D_VERSION     2.087.0
-ENV DMD_DEB       dmd_2.087.0-0_amd64.deb
+ENV D_VERSION=2.087.0
+ENV DMD_DEB=dmd_2.087.0-0_amd64.deb
 RUN \
   `# D dependencies` \
   wget -q http://downloads.dlang.org/releases/2.x/${D_VERSION}/${DMD_DEB} && \
@@ -124,11 +118,11 @@ RUN \
   mv deimos-openssl-1.1.0h/C/* /usr/include/dmd/druntime/import/C/ && \
   rm -rf deimos-openssl-1.1.0h
 
-ENV DART_VERSION 2.7.2-1
+ENV DART_VERSION=3.13.3-1
 RUN apt-get install -y --no-install-recommends \
   `# Dart dependencies` \
   dart=$DART_VERSION
-ENV PATH /usr/lib/dart/bin:$PATH
+ENV PATH=/usr/lib/dart/bin:$PATH
 
 RUN add-apt-repository ppa:dotnet/backports
 RUN apt-get install -y --no-install-recommends \
@@ -146,16 +140,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends libncurses5-dev
   kerl build $ERLANG_OTP_VERSION && kerl install $ERLANG_OTP_VERSION /usr/local/lib/otp/ && . /usr/local/lib/otp/activate && \
   curl -ssLo /usr/local/bin/rebar3 https://github.com/erlang/rebar3/releases/download/${ERLANG_REBAR_VERSION}/rebar3 && chmod +x /usr/local/bin/rebar3 && \
   rebar3 --version
-ENV PATH /usr/local/lib/otp/bin:$PATH
+ENV PATH=/usr/local/lib/otp/bin:$PATH
 
 RUN apt-get install -y --no-install-recommends \
   `# GlibC dependencies` \
   libglib2.0-dev
 
 # golang
-ENV GOLANG_VERSION 1.24.3
-ENV GOLANG_DOWNLOAD_URL https://go.dev/dl/go$GOLANG_VERSION.linux-amd64.tar.gz
-ENV GOLANG_DOWNLOAD_SHA256 3333f6ea53afa971e9078895eaa4ac7204a8c6b5c68c10e6bc9a33e8e391bdd8
+ENV GOLANG_VERSION=1.24.3
+ENV GOLANG_DOWNLOAD_URL=https://go.dev/dl/go$GOLANG_VERSION.linux-amd64.tar.gz
+ENV GOLANG_DOWNLOAD_SHA256=3333f6ea53afa971e9078895eaa4ac7204a8c6b5c68c10e6bc9a33e8e391bdd8
 RUN curl -fsSL "$GOLANG_DOWNLOAD_URL" -o golang.tar.gz && \
   echo "$GOLANG_DOWNLOAD_SHA256  golang.tar.gz" | sha256sum -c - && \
   tar -C /usr/local -xzf golang.tar.gz && \
@@ -175,7 +169,7 @@ RUN cd $HOME && \
     tar xvf neko-${NEKO_VERSION}-linux64.tar.gz && \
     rm neko-${NEKO_VERSION}-linux64.tar.gz && \
     mv neko-* /opt/neko
-ENV PATH /opt/haxe:/opt/neko:$PATH
+ENV PATH=/opt/haxe:/opt/neko:$PATH
 RUN echo "/opt/neko" > /etc/ld.so.conf.d/neko.conf && \
     ldconfig
 USER ${user}
@@ -203,9 +197,6 @@ RUN apt-get install -y --no-install-recommends \
   `# Lua dependencies` \
   lua5.4 \
   liblua5.4-dev
-# https://bugs.launchpad.net/ubuntu/+source/lua5.3/+bug/1707212
-# lua5.3 does not install alternatives!
-# need to update our luasocket code, lua doesn't have luaL_openlib any more
 
 RUN apt-get install -y --no-install-recommends \
   `# Node.js dependencies` \
@@ -234,15 +225,18 @@ RUN apt-get install -y --no-install-recommends \
   libnet-ssleay-perl \
   libtest-exception-perl
 
+# PHP via Ondřej Surý PPA (jammy default is 8.1 which is below our 8.2 floor)
+RUN add-apt-repository -y ppa:ondrej/php && \
+  apt-get update -yq
+
 RUN apt-get install -y --no-install-recommends \
   `# Php dependencies` \
-  php8.1 \
-  php8.1-cli \
-  php8.1-dev \
-  php8.1-mbstring \
-  php8.1-xml \
-  php8.1-curl \
-  php8.1-xdebug \
+  php8.2 \
+  php8.2-cli \
+  php8.2-dev \
+  php8.2-xml \
+  php8.2-curl \
+  php8.2-xdebug \
   php-pear \
   re2c \
   composer
@@ -266,24 +260,9 @@ RUN apt-get install -y --no-install-recommends \
 
 USER ${user}
 RUN `# Rust dependencies` \
-    curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain 1.83.0 -y
-ENV PATH /home/${user}/.cargo/bin:$PATH
+    curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain 1.99.0 -y
+ENV PATH=/home/${user}/.cargo/bin:$PATH
 USER root
-
-# Swift on Linux for cross tests
-RUN apt-get install -yq \
-  libedit-dev \
-  libz3-dev \
-  libpython2-dev \
-  libxml2-dev && \
-  cd / && \
-  wget --quiet https://download.swift.org/swift-5.7-release/ubuntu2204/swift-5.7-RELEASE/swift-5.7-RELEASE-ubuntu22.04.tar.gz && \
-  tar xf swift-5.7-RELEASE-ubuntu22.04.tar.gz && \
-  mv swift-5.7-RELEASE-ubuntu22.04 /usr/share/swift && \
-  rm swift-5.7-RELEASE-ubuntu22.04.tar.gz
-
-ENV PATH /usr/share/swift/usr/bin:$PATH
-RUN swift --version
 
 # Locale(s) for cpp unit tests
 RUN apt-get install -y --no-install-recommends \
@@ -306,7 +285,7 @@ RUN apt-get install -y --no-install-recommends \
 #     rm -rf /tmp/* && \
 #     rm -rf /var/tmp/*
 
-ENV THRIFT_ROOT /thrift
+ENV THRIFT_ROOT=/thrift
 RUN mkdir -p $THRIFT_ROOT/src && \
     chown -R ${uid}:${uid} $THRIFT_ROOT/
 COPY Dockerfile $THRIFT_ROOT/

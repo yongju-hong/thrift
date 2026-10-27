@@ -44,15 +44,6 @@ if (NOT Boost_USE_STATIC_LIBS)
     add_definitions(-DBOOST_TEST_DYN_LINK)
 endif()
 
-# as3
-option(WITH_AS3 "Build ActionScript 3 Thrift Library" ON)
-if (WITH_AS3)
-    set(POSSIBLE_PATHS "${FLEX_HOME}/bin" "$ENV{FLEX_HOME}/bin")
-    find_program(HAVE_COMPC NAMES compc HINTS ${POSSIBLE_PATHS})
-endif ()
-CMAKE_DEPENDENT_OPTION(BUILD_AS3 "Build as3 library" ON
-                       "BUILD_LIBRARIES;WITH_AS3;HAVE_COMPC" OFF)
-
 # C++
 option(WITH_CPP "Build C++ Thrift library" ON)
 if(WITH_CPP)
@@ -79,8 +70,9 @@ CMAKE_DEPENDENT_OPTION(BUILD_CPP "Build C++ library" ON
 
 # C GLib
 option(WITH_C_GLIB "Build C (GLib) Thrift library" ON)
+set(GLIB_MINREV 2.48)
 if(WITH_C_GLIB)
-    find_package(GLIB QUIET COMPONENTS gobject)
+    find_package(GLIB ${GLIB_MINREV} QUIET COMPONENTS gobject)
 endif()
 CMAKE_DEPENDENT_OPTION(BUILD_C_GLIB "Build C (GLib) library" ON
                        "BUILD_LIBRARIES;WITH_C_GLIB;GLIB_FOUND" OFF)
@@ -127,7 +119,7 @@ CMAKE_DEPENDENT_OPTION(BUILD_PYTHON "Build Python library" ON
 
 # Common library options
 # https://cmake.org/cmake/help/latest/variable/BUILD_SHARED_LIBS.html
-# Default on Windows is static, shared mode library support needs work...
+# Default is shared libraries on Windows, static libraries elsewhere
 if(WIN32)
     set(DEFAULT_BUILD_SHARED_LIBS ON)
 else()
@@ -171,10 +163,6 @@ message(STATUS "  Build type:                                 ${CMAKE_BUILD_TYPE
 message(STATUS)
 message(STATUS "Language libraries:")
 message(STATUS)
-message(STATUS "  Build as3 library:                          ${BUILD_AS3}")
-MESSAGE_DEP(WITH_AS3 "Disabled by WITH_AS3=OFF")
-MESSAGE_DEP(HAVE_COMPC "Adobe Flex compc was not found - did you set env var FLEX_HOME?")
-message(STATUS)
 message(STATUS "  Build with OpenSSL:                         ${WITH_OPENSSL}")
 if(WITH_OPENSSL)
     message(STATUS "    Version:                                  ${OPENSSL_VERSION}")
@@ -192,7 +180,7 @@ endif ()
 message(STATUS)
 message(STATUS "  Build C (GLib) library:                     ${BUILD_C_GLIB}")
 MESSAGE_DEP(WITH_C_GLIB "Disabled by WITH_C_GLIB=OFF")
-MESSAGE_DEP(GLIB_FOUND "GLib missing")
+MESSAGE_DEP(GLIB_FOUND "GLib ${GLIB_MINREV} or later missing")
 message(STATUS)
 message(STATUS "  Build Java library:                         ${BUILD_JAVA}")
 MESSAGE_DEP(WITH_JAVA "Disabled by WITH_JAVA=OFF")

@@ -25,7 +25,8 @@ data compression.
 import zlib
 from io import BytesIO
 
-from .TTransport import TTransportBase, CReadableTransport
+from .TTransport import TTransportBase, CReadableTransport, TTransportException
+from .THeaderTransport import DEFAULT_MAX_FRAME_SIZE
 
 
 class TZlibTransportFactory:
@@ -47,7 +48,8 @@ class TZlibTransportFactory:
     _last_trans = None
     _last_z = None
 
-    def getTransport(self, trans, compresslevel=9):
+    def getTransport(self, trans, compresslevel=9,
+                     max_decompressed_size=DEFAULT_MAX_FRAME_SIZE):
         """Wrap a transport, trans, with the TZlibTransport
         compressed transport class, returning a new
         transport to the caller.
@@ -61,7 +63,7 @@ class TZlibTransportFactory:
         """
         if trans == self._last_trans:
             return self._last_z
-        ztrans = TZlibTransport(trans, compresslevel)
+        ztrans = TZlibTransport(trans, compresslevel, max_decompressed_size)
         self._last_trans = trans
         self._last_z = ztrans
         return ztrans
@@ -76,7 +78,8 @@ class TZlibTransport(TTransportBase, CReadableTransport):
     # the TBinaryProtocolAccelerated class.
     DEFAULT_BUFFSIZE = 4096
 
-    def __init__(self, trans, compresslevel=9):
+    def __init__(self, trans, compresslevel=9,
+                 max_decompressed_size=DEFAULT_MAX_FRAME_SIZE):
         """Create a new TZlibTransport, wrapping C{trans}, another
         TTransport derived object.
 
@@ -85,9 +88,17 @@ class TZlibTransport(TTransportBase, CReadableTransport):
         @param compresslevel: The zlib compression level, ranging
         from 0 (no compression) to 9 (best compression).  Default is 9.
         @type compresslevel: int
+        @param max_decompressed_size: Maximum total decompressed bytes
+        allowed per session before a SIZE_LIMIT exception is raised.
+        Must be > 0.
+        Defaults to DEFAULT_MAX_FRAME_SIZE (16384000 bytes).
+        @type max_decompressed_size: int
         """
+        if max_decompressed_size <= 0:
+            raise ValueError("max_decompressed_size should be > 0")
         self.__trans = trans
         self.compresslevel = compresslevel
+        self._max_decompressed_size = max_decompressed_size
         self.__rbuf = BytesIO()
         self.__wbuf = BytesIO()
         self._init_zlib()
@@ -115,6 +126,7 @@ class TZlibTransport(TTransportBase, CReadableTransport):
         """
         self._zcomp_read = zlib.decompressobj()
         self._zcomp_write = zlib.compressobj(self.compresslevel)
+        self._bytes_decompressed = 0
 
     def getCompRatio(self):
         """Get the current measured compression ratios (in,out) from
@@ -197,9 +209,21 @@ class TZlibTransport(TTransportBase, CReadableTransport):
         """Read compressed data from the underlying transport, then
         decompress it and append it to the internal StringIO read buffer
         """
+        remaining = self._max_decompressed_size - self._bytes_decompressed
+        if remaining <= 0:
+            raise TTransportException(
+                TTransportException.SIZE_LIMIT,
+                "Decompressed payload exceeds maximum allowed size.",
+            )
         zbuf = self.__trans.read(sz)
         zbuf = self._zcomp_read.unconsumed_tail + zbuf
-        buf = self._zcomp_read.decompress(zbuf)
+        buf = self._zcomp_read.decompress(zbuf, remaining)
+        if self._zcomp_read.unconsumed_tail:
+            raise TTransportException(
+                TTransportException.SIZE_LIMIT,
+                "Decompressed payload exceeds maximum allowed size.",
+            )
+        self._bytes_decompressed += len(buf)
         self.bytes_in += len(zbuf)
         self.bytes_in_comp += len(buf)
         old = self.__rbuf.read()

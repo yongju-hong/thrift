@@ -19,6 +19,12 @@
 
 DESTDIR ?= /
 
+SUBDIRS = .
+
+if WITH_TESTS
+SUBDIRS += test/fuzz
+endif
+
 if HAVE_BUNDLER
 
 all-local:
@@ -39,6 +45,9 @@ check-local: all
 
 endif
 
+style-local:
+	cd $(srcdir) && $(BUNDLER) exec rubocop -a
+
 dist-hook:
 	$(RM) -r $(distdir)/spec/gen-rb/
 
@@ -46,9 +55,13 @@ distdir:
 	$(MAKE) $(AM_MAKEFLAGS) distdir-am
 
 EXTRA_DIST = \
+	.rubocop.yml \
 	coding_standards.md \
 	Rakefile \
 	Gemfile \
+	Gemfile.linters \
+	Gemfile.lock \
+	test/fuzz/.gitignore \
 	thrift.gemspec \
 	lib \
 	ext \

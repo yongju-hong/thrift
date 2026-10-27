@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -17,10 +18,9 @@
 # under the License.
 #
 
-require 'spec_helper'
+require "spec_helper"
 
-describe 'StructNestedContainers' do
-
+describe "StructNestedContainers" do
   def with_type_checking
     saved_type_checking, Thrift.type_checking = Thrift.type_checking, true
     begin
@@ -55,6 +55,43 @@ describe 'StructNestedContainers' do
         expect(a).to eq(b)
         b.value.add [3, 4, 5]
         expect(a).not_to eq(b)
+      end
+    end
+
+    [Thrift::BinaryProtocol, Thrift::CompactProtocol, Thrift::JsonProtocol].each do |protocol_class|
+      describe "sets of lists with #{protocol_class}" do
+        let(:lists) { [[], [1], [2, 3]] }
+
+        {
+          "Set" => ->(items) { Set.new(items) },
+          "Set subclass" => ->(items) { Class.new(Set).new(items) },
+          "Array" => ->(items) { items },
+          "Hash" => ->(items) { items.zip([true, false, nil]).to_h },
+        }.each do |representation, build_set|
+          it "preserves list elements in the pure-Ruby writer using #{representation}" do
+            struct = SpecNamespace::NestedListInSet.new
+            field = SpecNamespace::NestedListInSet::FIELDS[1]
+            transport = Thrift::MemoryBufferTransport.new
+            protocol = protocol_class.new(transport)
+
+            # Call the Ruby container writer even when the native struct writer is loaded.
+            struct.write_container(protocol, build_set.call(lists), field)
+
+            expect(struct.read_field(protocol_class.new(transport), field)).to eq(Set.new(lists))
+            expect(transport.available).to eq(0)
+          end
+        end
+
+        it "round trips a generated struct containing a set of lists" do
+          original = SpecNamespace::NestedListInSet.new(value: Set.new(lists))
+          transport = Thrift::MemoryBufferTransport.new
+          original.write(protocol_class.new(transport))
+          restored = SpecNamespace::NestedListInSet.new
+          restored.read(protocol_class.new(transport))
+
+          expect(restored).to eq(original)
+          expect(transport.available).to eq(0)
+        end
       end
     end
 
@@ -166,7 +203,7 @@ describe 'StructNestedContainers' do
       with_type_checking do
         a, b = SpecNamespace::NestedMapInMapKey.new, SpecNamespace::NestedMapInMapKey.new
         [a, b].each do |thrift_struct|
-          thrift_struct.value = { { 1 => 2, 3 => 4} => 1, {2 => 3, 4 => 5}  => 2 }
+          thrift_struct.value = { { 1 => 2, 3 => 4} => 1, {2 => 3, 4 => 5} => 2 }
           thrift_struct.validate
         end
         expect(a).to eq(b)

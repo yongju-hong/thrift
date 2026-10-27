@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -17,10 +18,9 @@
 # under the License.
 #
 
-require 'spec_helper'
+require "spec_helper"
 
 describe Thrift::Types do
-
   before(:each) do
     Thrift.type_checking = true
   end
@@ -29,7 +29,7 @@ describe Thrift::Types do
     Thrift.type_checking = false
   end
 
-  context 'type checking' do
+  context "type checking" do
     it "should return the proper name for each type" do
       expect(Thrift.type_name(Thrift::Types::I16)).to eq("Types::I16")
       expect(Thrift.type_name(Thrift::Types::VOID)).to eq("Types::VOID")
@@ -37,79 +37,134 @@ describe Thrift::Types do
       expect(Thrift.type_name(42)).to be_nil
     end
 
+    it "keeps exact paths through mixed containers and struct class mismatches" do
+      field = {
+        type: Thrift::Types::MAP,
+        key: {type: Thrift::Types::STRING},
+        value: {
+          type: Thrift::Types::SET,
+          element: {type: Thrift::Types::LIST, element: {type: Thrift::Types::I32}},
+        },
+      }
+      expect { Thrift.check_type({nil => Set.new}, field, :root) }.to raise_error(
+        Thrift::TypeError, "Expected Types::STRING, received NilClass for field root.key",
+      )
+      expect { Thrift.check_type({"a" => Set.new([[1, nil]])}, field, :root) }.to raise_error(
+        Thrift::TypeError, "Expected Types::I32, received NilClass for field root.value.element.element",
+      )
+      field = {type: Thrift::Types::LIST, element: {type: Thrift::Types::STRUCT, class: SpecNamespace::Hello}}
+      expect { Thrift.check_type([SpecNamespace::BoolStruct.new], field, :root) }.to raise_error(
+        Thrift::TypeError, "Expected SpecNamespace::Hello, received SpecNamespace::BoolStruct for field root.element",
+      )
+    end
+
+    it "accepts primitive and container subclasses but requires the declared struct class" do
+      string = Class.new(String).new("value")
+      list = Class.new(Array).new([string])
+      map = Class.new(Hash).new
+      map[string] = list
+      field = {
+        type: Thrift::Types::MAP,
+        key: {type: Thrift::Types::STRING},
+        value: {type: Thrift::Types::LIST, element: {type: Thrift::Types::UUID}},
+      }
+      expect { Thrift.check_type(map, field, :root) }.not_to raise_error
+      set = Class.new(Set).new([false, true])
+      expect { Thrift.check_type(set, {type: Thrift::Types::SET, element: {type: Thrift::Types::BOOL}}, :root) }.not_to raise_error
+      subclass = Class.new(SpecNamespace::Hello)
+      value = subclass.new
+      expect { Thrift.check_type(value, {type: Thrift::Types::STRUCT, class: SpecNamespace::Hello}, :root) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(value, {type: Thrift::Types::STRUCT, class: subclass}, :root) }.not_to raise_error
+      union = SpecNamespace::TestUnion.new
+      expect { Thrift.check_type(union, {type: Thrift::Types::STRUCT, class: union.class}, :root) }.not_to raise_error
+    end
+
+    it "preserves nil defaults, explicit void elements and unknown type errors" do
+      expect(Thrift.check_type(nil, nil, :root)).to be_nil
+      expect { Thrift.check_type(nil, {type: Thrift::Types::VOID}, :root, false) }.not_to raise_error
+      expect { Thrift.check_type([nil], {type: Thrift::Types::LIST, element: {type: Thrift::Types::VOID}}, :root) }.not_to raise_error
+      expect { Thrift.check_type(false, {type: 42}, :root) }.to raise_error(
+        Thrift::TypeError, "Expected , received FalseClass for field root",
+      )
+    end
+
     it "should check types properly" do
       # lambda { Thrift.check_type(nil, Thrift::Types::STOP) }.should raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(3,              {:type => Thrift::Types::STOP},   :foo) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(nil,            {:type => Thrift::Types::VOID},   :foo) }.not_to raise_error
-      expect { Thrift.check_type(3,              {:type => Thrift::Types::VOID},   :foo) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(true,           {:type => Thrift::Types::BOOL},   :foo) }.not_to raise_error
-      expect { Thrift.check_type(3,              {:type => Thrift::Types::BOOL},   :foo) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(42,             {:type => Thrift::Types::BYTE},   :foo) }.not_to raise_error
-      expect { Thrift.check_type(42,             {:type => Thrift::Types::I16},    :foo) }.not_to raise_error
-      expect { Thrift.check_type(42,             {:type => Thrift::Types::I32},    :foo) }.not_to raise_error
-      expect { Thrift.check_type(42,             {:type => Thrift::Types::I64},    :foo) }.not_to raise_error
-      expect { Thrift.check_type(3.14,           {:type => Thrift::Types::I32},    :foo) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(3.14,           {:type => Thrift::Types::DOUBLE}, :foo) }.not_to raise_error
-      expect { Thrift.check_type(3,              {:type => Thrift::Types::DOUBLE}, :foo) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type("3",            {:type => Thrift::Types::STRING}, :foo) }.not_to raise_error
-      expect { Thrift.check_type(3,              {:type => Thrift::Types::STRING}, :foo) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(3,               {type: Thrift::Types::STOP},   :foo) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(nil,             {type: Thrift::Types::VOID},   :foo) }.not_to raise_error
+      expect { Thrift.check_type(3,               {type: Thrift::Types::VOID},   :foo) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(true,            {type: Thrift::Types::BOOL},   :foo) }.not_to raise_error
+      expect { Thrift.check_type(3,               {type: Thrift::Types::BOOL},   :foo) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(42,              {type: Thrift::Types::BYTE},   :foo) }.not_to raise_error
+      expect { Thrift.check_type(42,              {type: Thrift::Types::I16},    :foo) }.not_to raise_error
+      expect { Thrift.check_type(42,              {type: Thrift::Types::I32},    :foo) }.not_to raise_error
+      expect { Thrift.check_type(42,              {type: Thrift::Types::I64},    :foo) }.not_to raise_error
+      expect { Thrift.check_type(3.14,            {type: Thrift::Types::I32},    :foo) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(3.14,            {type: Thrift::Types::DOUBLE}, :foo) }.not_to raise_error
+      expect { Thrift.check_type(3,               {type: Thrift::Types::DOUBLE}, :foo) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type("3",             {type: Thrift::Types::STRING}, :foo) }.not_to raise_error
+      expect { Thrift.check_type(3,               {type: Thrift::Types::STRING}, :foo) }.to raise_error(Thrift::TypeError)
       hello = SpecNamespace::Hello.new
-      expect { Thrift.check_type(hello,          {:type => Thrift::Types::STRUCT, :class => SpecNamespace::Hello}, :foo) }.not_to raise_error
-      expect { Thrift.check_type("foo",          {:type => Thrift::Types::STRUCT}, :foo) }.to raise_error(Thrift::TypeError)
-      field = {:type => Thrift::Types::MAP, :key => {:type => Thrift::Types::I32}, :value => {:type => Thrift::Types::STRING}}
-      expect { Thrift.check_type({1 => "one"},   field,                            :foo) }.not_to raise_error
-      expect { Thrift.check_type([1],            field,                            :foo) }.to raise_error(Thrift::TypeError)
-      field = {:type => Thrift::Types::LIST, :element => {:type => Thrift::Types::I32}}
-      expect { Thrift.check_type([1],            field,                            :foo) }.not_to raise_error
-      expect { Thrift.check_type({:foo => 1},    field,                            :foo) }.to raise_error(Thrift::TypeError)
-      field = {:type => Thrift::Types::SET, :element => {:type => Thrift::Types::I32}}
-      expect { Thrift.check_type(Set.new([1,2]), field,                            :foo) }.not_to raise_error
-      expect { Thrift.check_type([1,2],          field,                            :foo) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type({:foo => true}, field,                            :foo) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(hello,           {type: Thrift::Types::STRUCT, class: SpecNamespace::Hello}, :foo) }.not_to raise_error
+      expect { Thrift.check_type("foo",           {type: Thrift::Types::STRUCT}, :foo) }.to raise_error(Thrift::TypeError)
+      field = {type: Thrift::Types::MAP, key: {type: Thrift::Types::I32}, value: {type: Thrift::Types::STRING}}
+      expect { Thrift.check_type({1 => "one"},    field,                            :foo) }.not_to raise_error
+      expect { Thrift.check_type([1],             field,                            :foo) }.to raise_error(Thrift::TypeError)
+      field = {type: Thrift::Types::LIST, element: {type: Thrift::Types::I32}}
+      expect { Thrift.check_type([1], field, :foo) }.not_to raise_error
+      expect { Thrift.check_type({foo: 1}, field, :foo) }.to raise_error(Thrift::TypeError)
+      field = {type: Thrift::Types::SET, element: {type: Thrift::Types::I32}}
+      expect { Thrift.check_type(Set.new([1, 2]), field,                            :foo) }.not_to raise_error
+      expect { Thrift.check_type([1, 2],          field,                            :foo) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type({foo: true}, field, :foo) }.to raise_error(Thrift::TypeError)
     end
 
     it "should error out if nil is passed and skip_types is false" do
-      expect { Thrift.check_type(nil, {:type => Thrift::Types::BOOL},   :foo, false) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(nil, {:type => Thrift::Types::BYTE},   :foo, false) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(nil, {:type => Thrift::Types::I16},    :foo, false) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(nil, {:type => Thrift::Types::I32},    :foo, false) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(nil, {:type => Thrift::Types::I64},    :foo, false) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(nil, {:type => Thrift::Types::DOUBLE}, :foo, false) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(nil, {:type => Thrift::Types::STRING}, :foo, false) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(nil, {:type => Thrift::Types::STRUCT}, :foo, false) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(nil, {:type => Thrift::Types::LIST},   :foo, false) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(nil, {:type => Thrift::Types::SET},    :foo, false) }.to raise_error(Thrift::TypeError)
-      expect { Thrift.check_type(nil, {:type => Thrift::Types::MAP},    :foo, false) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(nil, {type: Thrift::Types::BOOL},   :foo, false) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(nil, {type: Thrift::Types::BYTE},   :foo, false) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(nil, {type: Thrift::Types::I16},    :foo, false) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(nil, {type: Thrift::Types::I32},    :foo, false) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(nil, {type: Thrift::Types::I64},    :foo, false) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(nil, {type: Thrift::Types::DOUBLE}, :foo, false) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(nil, {type: Thrift::Types::STRING}, :foo, false) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(nil, {type: Thrift::Types::STRUCT}, :foo, false) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(nil, {type: Thrift::Types::LIST},   :foo, false) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(nil, {type: Thrift::Types::SET},    :foo, false) }.to raise_error(Thrift::TypeError)
+      expect { Thrift.check_type(nil, {type: Thrift::Types::MAP},    :foo, false) }.to raise_error(Thrift::TypeError)
     end
 
     it "should check element types on containers" do
-      field = {:type => Thrift::Types::LIST, :element => {:type => Thrift::Types::I32}}
+      field = {type: Thrift::Types::LIST, element: {type: Thrift::Types::I32}}
       expect { Thrift.check_type([1, 2], field, :foo) }.not_to raise_error
       expect { Thrift.check_type([1, nil, 2], field, :foo) }.to raise_error(Thrift::TypeError)
-      field = {:type => Thrift::Types::MAP, :key => {:type => Thrift::Types::I32}, :value => {:type => Thrift::Types::STRING}}
+      field = {type: Thrift::Types::MAP, key: {type: Thrift::Types::I32}, value: {type: Thrift::Types::STRING}}
       expect { Thrift.check_type({1 => "one", 2 => "two"}, field, :foo) }.not_to raise_error
       expect { Thrift.check_type({1 => "one", nil => "nil"}, field, :foo) }.to raise_error(Thrift::TypeError)
       expect { Thrift.check_type({1 => nil, 2 => "two"}, field, :foo) }.to raise_error(Thrift::TypeError)
-      field = {:type => Thrift::Types::SET, :element => {:type => Thrift::Types::I32}}
+      field = {type: Thrift::Types::SET, element: {type: Thrift::Types::I32}}
       expect { Thrift.check_type(Set.new([1, 2]), field, :foo) }.not_to raise_error
       expect { Thrift.check_type(Set.new([1, nil, 2]), field, :foo) }.to raise_error(Thrift::TypeError)
       expect { Thrift.check_type(Set.new([1, 2.3, 2]), field, :foo) }.to raise_error(Thrift::TypeError)
 
-      field = {:type => Thrift::Types::STRUCT, :class => SpecNamespace::Hello}
+      field = {type: Thrift::Types::STRUCT, class: SpecNamespace::Hello}
       expect { Thrift.check_type(SpecNamespace::BoolStruct, field, :foo) }.to raise_error(Thrift::TypeError)
     end
 
     it "should give the Thrift::TypeError a readable message" do
       msg = "Expected Types::STRING, received Integer for field foo"
-      expect { Thrift.check_type(3, {:type => Thrift::Types::STRING}, :foo) }.to raise_error(Thrift::TypeError, msg)
+      expect { Thrift.check_type(3, {type: Thrift::Types::STRING}, :foo) }.to raise_error(Thrift::TypeError, msg)
       msg = "Expected Types::STRING, received Integer for field foo.element"
-      field = {:type => Thrift::Types::LIST, :element => {:type => Thrift::Types::STRING}}
+      field = {type: Thrift::Types::LIST, element: {type: Thrift::Types::STRING}}
       expect { Thrift.check_type([3], field, :foo) }.to raise_error(Thrift::TypeError, msg)
       msg = "Expected Types::I32, received NilClass for field foo.element.key"
-      field = {:type => Thrift::Types::LIST,
-               :element => {:type => Thrift::Types::MAP,
-                            :key => {:type => Thrift::Types::I32},
-                            :value => {:type => Thrift::Types::I32}}}
+      field = {
+        type: Thrift::Types::LIST,
+        element: {
+          type: Thrift::Types::MAP,
+          key: {type: Thrift::Types::I32},
+          value: {type: Thrift::Types::I32},
+        },
+      }
       expect { Thrift.check_type([{nil => 3}], field, :foo) }.to raise_error(Thrift::TypeError, msg)
       msg = "Expected Types::I32, received NilClass for field foo.element.value"
       expect { Thrift.check_type([{1 => nil}], field, :foo) }.to raise_error(Thrift::TypeError, msg)

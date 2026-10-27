@@ -1,4 +1,5 @@
 # encoding: UTF-8
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -18,10 +19,179 @@
 # under the License.
 #
 
-require 'spec_helper'
+require "spec_helper"
 
-describe 'JsonProtocol' do
+describe "JSON input byte ownership" do
+  class FragmentedJsonInput < Thrift::BaseTransport
+    attr_reader :requested
 
+    def initialize(parts)
+      @parts = parts.map(&:b)
+      @requested = []
+    end
+
+    def read(size)
+      @requested << size
+      @parts.shift while @parts.first == ""
+      raise EOFError, "fragmented input exhausted" if @parts.empty?
+
+      @parts.first.slice!(0, size)
+    end
+  end
+
+  it "reads Unicode, escapes, base64 and numbers across every fragment boundary" do
+    wire = <<~'JSON'.chomp.b
+      ["str",3,"raw € 😀\u20ac\uD83D\uDE00\\\"\/\b\f\n\r\t","QUJDRA",-12.5e+2]
+    JSON
+    (1...wire.bytesize).each do |split|
+      input = FragmentedJsonInput.new([wire.byteslice(0, split), wire.byteslice(split..-1)])
+      protocol = Thrift::JsonProtocol.new(Thrift::BufferedTransport.new(input))
+      expect(protocol.read_list_begin).to eq([Thrift::Types::STRING, 3])
+      expect(protocol.read_string).to eq("raw € 😀€😀\\\"/\b\f\n\r\t")
+      expect(protocol.read_binary).to eq("ABCD")
+      expect(protocol.read_double).to eq(-1250.0)
+      protocol.read_list_end
+    end
+  end
+
+  it "leaves the following value in the transport and owns at most one peeked byte" do
+    trans = Thrift::MemoryBufferTransport.new('"first"123,"second"')
+    protocol = Thrift::JsonProtocol.new(trans)
+    expect(protocol.read_string).to eq("first")
+    expect(trans.available).to eq('123,"second"'.bytesize)
+    expect(protocol.read_i32).to eq(123)
+    expect(trans.read(1)).to eq('"') # Only the comma belongs to the reader.
+    reader = protocol.instance_variable_get(:@reader)
+    expect(reader.peek).to eq(",")
+    expect(reader.read).to eq(",")
+  end
+
+  it "falls back to read when the transport has no byte API" do
+    klass = Class.new(Thrift::MemoryBufferTransport) { undef_method :read_byte }
+    value = "v" * 64
+    expect(Thrift::JsonProtocol.new(klass.new('"' + value + '"')).read_string).to eq(value)
+  end
+
+  it "uses the byte API on a duck-typed transport" do
+    value = "v" * 64
+    input = Thrift::MemoryBufferTransport.new('"' + value + '"')
+    transport = double("Transport")
+    allow(transport).to receive(:read).with(1) { input.read(1) }
+    expect(transport).to receive(:read_byte).at_least(:once) { input.read_byte }
+
+    expect(Thrift::JsonProtocol.new(transport).read_string).to eq(value)
+    expect(input.available).to eq(0)
+  end
+
+  it "preserves Unicode decoding hooks" do
+    protocol_class = Class.new(Thrift::JsonProtocol) do
+      def read_json_escape_char
+        super.upcase
+      end
+    end
+    trans = Thrift::MemoryBufferTransport.new('"' + ("v" * 64) + 'a\\u0062"')
+    expect(protocol_class.new(trans).read_string).to eq(("v" * 64) + "aB")
+  end
+
+  it "keeps tiny strings on the read path without inspecting byte-read eligibility" do
+    protocol = Thrift::JsonProtocol.new(Thrift::MemoryBufferTransport.new('"""a"'))
+    reader = protocol.instance_variable_get(:@reader)
+    expect(reader).not_to receive(:byte_reads?)
+    expect(protocol.read_string).to eq("")
+    expect(protocol.read_string).to eq("a")
+  end
+
+  it "selects byte reads once when Unicode escapes cross the small-string threshold" do
+    wire = '"' + ('\\u20ac' * 6) + ("a" * 1024) + '"'
+    protocol = Thrift::JsonProtocol.new(Thrift::MemoryBufferTransport.new(wire))
+    reader = protocol.instance_variable_get(:@reader)
+    expect(reader).to receive(:byte_reads?).once.and_call_original
+    expect(reader).to receive(:read_byte).at_least(:once).and_call_original
+    expect(protocol.read_string).to eq(("€" * 6) + ("a" * 1024))
+  end
+
+  [Thrift::MemoryBufferTransport, Thrift::BufferedTransport].each do |klass|
+    it "uses the byte API when #{klass} customizes it" do
+      reads = 0
+      transport_class = Class.new(klass) do
+        define_method(:read_byte) do
+          reads += 1
+          super()
+        end
+      end
+      value = "a" * 64
+      wire = '"' + value + '"'
+      trans = if klass == Thrift::BufferedTransport
+        transport_class.new(FragmentedJsonInput.new([wire]))
+      else
+        transport_class.new(wire)
+      end
+      expect(Thrift::JsonProtocol.new(trans).read_string).to eq(value)
+      expect(reads).to be > 0
+    end
+  end
+
+  it "supports duck-typed readers" do
+    value = "v" * 64
+    trans = Thrift::MemoryBufferTransport.new('"' + value + '"')
+    reader = Object.new
+    reader.define_singleton_method(:read) { trans.read(1) }
+    protocol = Thrift::JsonProtocol.new(trans)
+    protocol.instance_variable_set(:@reader, reader)
+    expect(protocol.read_string).to eq(value)
+  end
+
+  it "preserves invalid UTF-8 and Unicode errors across fragments" do
+    ["\"\xC3\x28\"".b, '"\\uD83D\\u0041"', '"\\uDE00"'].each do |wire|
+      (1...wire.bytesize).each do |split|
+        input = FragmentedJsonInput.new([wire.byteslice(0, split), wire.byteslice(split..-1)])
+        protocol = Thrift::JsonProtocol.new(Thrift::BufferedTransport.new(input))
+        expect { protocol.read_string }.to raise_error(Thrift::ProtocolException) do |error|
+          expect(error.type).to eq(Thrift::ProtocolException::INVALID_DATA)
+        end
+      end
+    end
+  end
+
+  it "retains mutable independent read and peek results" do
+    reader = Thrift::LookaheadReader.new(Thrift::MemoryBufferTransport.new("ab"))
+    first = reader.peek
+    expect(reader.read).to equal(first)
+    second = reader.read
+    second.replace("z")
+    expect(first).to eq("a")
+  end
+
+  it "does not consume the next frame when a string ends at a frame boundary" do
+    value = "a" * 64
+    first = '"' + value + '"'
+    wire = [first.bytesize].pack("N") + first + [3].pack("N") + '"b"'
+    input = Thrift::MemoryBufferTransport.new(wire)
+    protocol = Thrift::JsonProtocol.new(Thrift::FramedTransport.new(input))
+    expect(protocol.read_string).to eq(value)
+    expect(input.available).to eq(7)
+    expect(protocol.read_string).to eq("b")
+    expect(input.available).to eq(0)
+
+    value = ('"' + ("a" * 64) + '€\\uD83D\\uDE00"').b
+    wire = value.bytes.map { |byte| [1, byte].pack("NC") }.join
+    protocol = Thrift::JsonProtocol.new(Thrift::FramedTransport.new(Thrift::MemoryBufferTransport.new(wire)))
+    expect(protocol.read_string).to eq(("a" * 64) + "€😀")
+  end
+
+  it "preserves truncated input errors in plain and Unicode strings" do
+    ['"abc', '"abc\\'].each do |wire|
+      protocol = Thrift::JsonProtocol.new(Thrift::MemoryBufferTransport.new(wire))
+      expect { protocol.read_string }.to raise_error(EOFError, /Not enough bytes remain/)
+    end
+    ['"\\u123', '"\\uD83D\\uDE0'].each do |wire|
+      protocol = Thrift::JsonProtocol.new(Thrift::MemoryBufferTransport.new(wire))
+      expect { protocol.read_string }.to raise_error(Thrift::ProtocolException, "Incomplete Unicode escape")
+    end
+  end
+end
+
+describe "JsonProtocol" do
   describe Thrift::JsonProtocol do
     before(:each) do
       @trans = Thrift::MemoryBufferTransport.new
@@ -41,18 +211,93 @@ describe 'JsonProtocol' do
       expect(@trans.read(@trans.available)).to eq('\\n')
 
       @prot.write_json_char(" ")
-      expect(@trans.read(@trans.available)).to eq(' ')
+      expect(@trans.read(@trans.available)).to eq(" ")
 
       @prot.write_json_char("\\")
       expect(@trans.read(@trans.available)).to eq("\\\\")
 
       @prot.write_json_char("@")
-      expect(@trans.read(@trans.available)).to eq('@')
+      expect(@trans.read(@trans.available)).to eq("@")
     end
 
     it "should write json string" do
       @prot.write_json_string("this is a \\ json\nstring")
       expect(@trans.read(@trans.available)).to eq("\"this is a \\\\ json\\nstring\"")
+    end
+
+    it "writes every ASCII character with the existing JSON escapes" do
+      escapes = {8 => "\\b", 9 => "\\t", 10 => "\\n", 12 => "\\f", 13 => "\\r", 34 => '\\"', 92 => "\\\\"}
+      value = (0..127).to_a.pack("C*").freeze
+      expected = (0..127).map do |byte|
+        escapes.fetch(byte) { byte < 32 ? format("\\u%04x", byte) : byte.chr }
+      end.join
+
+      @prot.write_string(value)
+
+      expect(@trans.read(@trans.available)).to eq('"' + expected + '"')
+      expect(value.encoding).to eq(Encoding::BINARY)
+    end
+
+    it "preserves character hooks and transport write boundaries" do
+      transport = double("Transport")
+      protocol = Thrift::JsonProtocol.new(transport)
+      value = "a\u{1f600}\\\"\n\x01"
+
+      value.each_char do |ch|
+        expect(protocol).to receive(:write_json_char).with(ch).and_call_original
+      end
+      expect(protocol).to receive(:write_json_escape_char).with("\x01").and_call_original
+      expected = ['"', "a", "\u{1f600}", "\\", "\\", "\\", '"', "\\", "n", "\\u", "0001", '"']
+      expected.each do |str|
+        encoding = str == "0001" ? Encoding::US_ASCII : Encoding::UTF_8
+        expect(transport).to receive(:write).with(eq(str).and(have_attributes(encoding: encoding))).ordered.and_return(:written)
+      end
+
+      expect(protocol.write_string(value)).to eq(:written)
+    end
+
+    it "propagates transport exceptions at the same escape boundary" do
+      failure = IOError.new("write failed")
+      allow(@trans).to receive(:write).and_call_original
+      allow(@trans).to receive(:write).with("0001").and_raise(failure)
+
+      expect { @prot.write_string("a\x01z") }.to raise_error(failure.class) { |error| expect(error).to equal(failure) }
+      expect(@trans.read(@trans.available)).to eq('"a\u')
+    end
+
+    it "preserves string and numeric map key contexts" do
+      @prot.write_map_begin(Thrift::Types::I32, Thrift::Types::STRING, 1)
+      @prot.write_i32(42)
+      @prot.write_string("line\n\u{1f600}")
+      @prot.write_map_end
+      expect(@trans.read(@trans.available)).to eq("[\"i32\",\"str\",1,{\"42\":\"line\\n\u{1f600}\"}]".b)
+
+      @prot.write_map_begin(Thrift::Types::STRING, Thrift::Types::DOUBLE, 1)
+      @prot.write_string("key\"")
+      @prot.write_double(1.5)
+      @prot.write_map_end
+      expect(@trans.read(@trans.available)).to eq("[\"str\",\"dbl\",1,{\"key\\\"\":1.5}]")
+    end
+
+    it "transcodes frozen UTF-16 strings without changing their ownership" do
+      value = "a\n\u{1f600}".encode(Encoding::UTF_16LE).freeze
+      @prot.write_string(value)
+      expect(@trans.read(@trans.available)).to eq("\"a\\n\u{1f600}\"".b)
+      expect(value.encoding).to eq(Encoding::UTF_16LE)
+      expect(value).to eq("a\n\u{1f600}".encode(Encoding::UTF_16LE))
+    end
+
+    it "rejects invalid binary and untranscodable strings before changing map context" do
+      ["\xFF".b, "\x00\xD8".b.force_encoding(Encoding::UTF_16LE)].each do |value|
+        trans = Thrift::MemoryBufferTransport.new
+        protocol = Thrift::JsonProtocol.new(trans)
+        protocol.write_map_begin(Thrift::Types::STRING, Thrift::Types::I32, 1)
+        expect { protocol.write_string(value) }.to raise_error(Thrift::ProtocolException, "Invalid UTF-8 string")
+        protocol.write_string("ok")
+        protocol.write_i32(1)
+        protocol.write_map_end
+        expect(trans.read(trans.available)).to eq('["str","i32",1,{"ok":1}]')
+      end
     end
 
     it "should write json base64" do
@@ -81,13 +326,13 @@ describe 'JsonProtocol' do
       @prot.write_json_double(-3.21)
       expect(@trans.read(@trans.available)).to eq("-3.21")
 
-      @prot.write_json_double(((+1.0/0.0)/(+1.0/0.0)))
+      @prot.write_json_double((+1.0 / 0.0) / (+1.0 / 0.0))
       expect(@trans.read(@trans.available)).to eq("\"NaN\"")
 
-      @prot.write_json_double((+1.0/0.0))
+      @prot.write_json_double(+1.0 / 0.0)
       expect(@trans.read(@trans.available)).to eq("\"Infinity\"")
 
-      @prot.write_json_double((-1.0/0.0))
+      @prot.write_json_double(-1.0 / 0.0)
       expect(@trans.read(@trans.available)).to eq("\"-Infinity\"")
     end
 
@@ -211,28 +456,60 @@ describe 'JsonProtocol' do
       @prot.write_double(-32.1)
       expect(@trans.read(@trans.available)).to eq("-32.1")
 
-      @prot.write_double(((+1.0/0.0)/(+1.0/0.0)))
+      @prot.write_double((+1.0 / 0.0) / (+1.0 / 0.0))
       expect(@trans.read(@trans.available)).to eq("\"NaN\"")
 
-      @prot.write_double((+1.0/0.0))
+      @prot.write_double(+1.0 / 0.0)
       expect(@trans.read(@trans.available)).to eq("\"Infinity\"")
 
-      @prot.write_double((-1.0/0.0))
+      @prot.write_double(-1.0 / 0.0)
       expect(@trans.read(@trans.available)).to eq("\"-Infinity\"")
     end
 
-    it 'should write string' do
-      @prot.write_string('this is a test string')
+    it "should write string" do
+      @prot.write_string("this is a test string")
       a = @trans.read(@trans.available)
-      expect(a).to eq('"this is a test string"'.force_encoding(Encoding::BINARY))
+      expect(a).to eq('"this is a test string"'.b)
       expect(a.encoding).to eq(Encoding::BINARY)
     end
 
-    it 'should write string with unicode characters' do
+    it "should write string with unicode characters" do
       @prot.write_string("this is a test string with unicode characters: \u20AC \u20AD")
       a = @trans.read(@trans.available)
-      expect(a).to eq("\"this is a test string with unicode characters: \u20AC \u20AD\"".force_encoding(Encoding::BINARY))
+      expect(a).to eq("\"this is a test string with unicode characters: \u20AC \u20AD\"".b)
       expect(a.encoding).to eq(Encoding::BINARY)
+    end
+
+    it "transcodes non-UTF-8 strings before writing JSON" do
+      value = +"caf\xE9"
+      value.force_encoding(Encoding::ISO_8859_1)
+
+      @prot.write_string(value)
+      data = @trans.read(@trans.available)
+
+      expect(data).to eq("\"caf\u00E9\"".encode(Encoding::UTF_8).b)
+      expect(data.dup.force_encoding(Encoding::UTF_8)).to be_valid_encoding
+      expect(value.encoding).to eq(Encoding::ISO_8859_1)
+    end
+
+    it "writes valid UTF-8 stored in a binary string" do
+      value = "caf\xC3\xA9".b
+
+      @prot.write_string(value)
+      data = @trans.read(@trans.available)
+
+      expect(data).to eq("\"caf\xC3\xA9\"".b)
+      expect(value.encoding).to eq(Encoding::BINARY)
+    end
+
+    it "rejects invalid UTF-8 before writing any JSON bytes" do
+      value = "\xC3\x28".b.force_encoding(Encoding::UTF_8)
+
+      expect { @prot.write_string(value) }.to raise_error(Thrift::ProtocolException) do |error|
+        expect(error.type).to eq(Thrift::ProtocolException::INVALID_DATA)
+        expect(error.message).to eq("Invalid UTF-8 string")
+      end
+      expect(@trans.available).to eq(0)
     end
 
     it "should write binary" do
@@ -241,7 +518,7 @@ describe 'JsonProtocol' do
     end
 
     it "should write long binary" do
-      @prot.write_binary((0...256).to_a.pack('C*'))
+      @prot.write_binary((0...256).to_a.pack("C*"))
       expect(@trans.read(@trans.available)).to eq("\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/w==\"")
     end
 
@@ -251,8 +528,8 @@ describe 'JsonProtocol' do
     end
 
     it "should get type name for type id" do
-      expect {@prot.get_type_name_for_type_id(Thrift::Types::STOP)}.to raise_error(NotImplementedError)
-      expect {@prot.get_type_name_for_type_id(Thrift::Types::VOID)}.to raise_error(NotImplementedError)
+      expect { @prot.get_type_name_for_type_id(Thrift::Types::STOP) }.to raise_error(Thrift::ProtocolException, "Unknown type id: 0")
+      expect { @prot.get_type_name_for_type_id(Thrift::Types::VOID) }.to raise_error(Thrift::ProtocolException, "Unknown type id: 1")
       expect(@prot.get_type_name_for_type_id(Thrift::Types::BOOL)).to eq("tf")
       expect(@prot.get_type_name_for_type_id(Thrift::Types::BYTE)).to eq("i8")
       expect(@prot.get_type_name_for_type_id(Thrift::Types::DOUBLE)).to eq("dbl")
@@ -267,7 +544,7 @@ describe 'JsonProtocol' do
     end
 
     it "should get type id for type name" do
-      expect {@prot.get_type_id_for_type_name("pp")}.to raise_error(NotImplementedError)
+      expect { @prot.get_type_id_for_type_name("pp") }.to raise_error(Thrift::ProtocolException, 'Unknown type name: "pp"')
       expect(@prot.get_type_id_for_type_name("tf")).to eq(Thrift::Types::BOOL)
       expect(@prot.get_type_id_for_type_name("i8")).to eq(Thrift::Types::BYTE)
       expect(@prot.get_type_id_for_type_name("dbl")).to eq(Thrift::Types::DOUBLE)
@@ -281,16 +558,30 @@ describe 'JsonProtocol' do
       expect(@prot.get_type_id_for_type_name("lst")).to eq(Thrift::Types::LIST)
     end
 
+    it "should reject unknown field and container types as invalid protocol data" do
+      @trans.write('{"1":{"wat":0}}')
+      @prot.read_struct_begin
+      expect { @prot.read_field_begin }.to raise_error(Thrift::ProtocolException, 'Unknown type name: "wat"') do |error|
+        expect(error.type).to eq(Thrift::ProtocolException::INVALID_DATA)
+      end
+
+      trans = Thrift::MemoryBufferTransport.new('["wat",0]')
+      prot = Thrift::JsonProtocol.new(trans)
+      expect { prot.read_list_begin }.to raise_error(Thrift::ProtocolException, 'Unknown type name: "wat"') do |error|
+        expect(error.type).to eq(Thrift::ProtocolException::INVALID_DATA)
+      end
+    end
+
     it "should read json syntax char" do
-      @trans.write('F')
-      expect {@prot.read_json_syntax_char('G')}.to raise_error(Thrift::ProtocolException)
-      @trans.write('H')
-      @prot.read_json_syntax_char('H')
+      @trans.write("F")
+      expect { @prot.read_json_syntax_char("G") }.to raise_error(Thrift::ProtocolException)
+      @trans.write("H")
+      @prot.read_json_syntax_char("H")
     end
 
     it "should read json escape char" do
-      @trans.write('0054')
-      expect(@prot.read_json_escape_char).to eq('T')
+      @trans.write("0054")
+      expect(@prot.read_json_escape_char).to eq("T")
 
       @trans.write("\"\\\"\"")
       expect(@prot.read_json_string(false)).to eq("\"")
@@ -299,7 +590,7 @@ describe 'JsonProtocol' do
       expect(@prot.read_json_string(false)).to eq("\\")
 
       @trans.write("\"\\/\"")
-      expect(@prot.read_json_string(false)).to eq("\/")
+      expect(@prot.read_json_string(false)).to eq("/")
 
       @trans.write("\"\\b\"")
       expect(@prot.read_json_string(false)).to eq("\b")
@@ -317,9 +608,57 @@ describe 'JsonProtocol' do
       expect(@prot.read_json_string(false)).to eq("\t")
     end
 
+    it "decodes BMP and supplementary Unicode escapes" do
+      {
+        '"\u20AC"' => "\u20AC",
+        '"\uD83D\uDE00"' => "\u{1F600}",
+        '"\ud83d\uDe00"' => "\u{1F600}",
+      }.each do |wire, value|
+        trans = Thrift::MemoryBufferTransport.new(wire.b)
+        protocol = Thrift::JsonProtocol.new(trans)
+
+        expect(protocol.read_json_string).to eq(value)
+      end
+    end
+
+    it "decodes mixed raw UTF-8 and escaped Unicode" do
+      @trans.write("\"raw \u{1F600} and \\u20AC\"".encode(Encoding::UTF_8).b)
+
+      value = @prot.read_json_string
+
+      expect(value).to eq("raw \u{1F600} and \u20AC")
+      expect(value.encoding).to eq(Encoding::UTF_8)
+      expect(value).to be_valid_encoding
+    end
+
+    it "rejects malformed Unicode escapes and unpaired surrogates" do
+      [
+        '"\u12G4"',
+        '"\u123"',
+        '"\uD83D"',
+        '"\uD83D\u0041"',
+        '"\uDE00"',
+      ].each do |wire|
+        protocol = Thrift::JsonProtocol.new(Thrift::MemoryBufferTransport.new(wire.b))
+
+        expect { protocol.read_json_string }.to raise_error(Thrift::ProtocolException) do |error|
+          expect(error.type).to eq(Thrift::ProtocolException::INVALID_DATA)
+        end
+      end
+    end
+
+    it "rejects invalid raw UTF-8 in JSON strings" do
+      @trans.write("\"\xC3\x28\"".b)
+
+      expect { @prot.read_json_string }.to raise_error(Thrift::ProtocolException) do |error|
+        expect(error.type).to eq(Thrift::ProtocolException::INVALID_DATA)
+        expect(error.message).to eq("Invalid UTF-8 string")
+      end
+    end
+
     it "should read json string" do
       @trans.write("\"\\P")
-      expect {@prot.read_json_string(false)}.to raise_error(Thrift::ProtocolException)
+      expect { @prot.read_json_string(false) }.to raise_error(Thrift::ProtocolException)
 
       @trans.write("\"this is a test string\"")
       expect(@prot.read_json_string).to eq("this is a test string")
@@ -328,6 +667,16 @@ describe 'JsonProtocol' do
     it "should read json base64" do
       @trans.write("\"dGhpcyBpcyBhIHRlc3Qgc3RyaW5n\"")
       expect(@prot.read_json_base64).to eq("this is a test string")
+    end
+
+    it "rejects invalid Base64 alphabet and padding" do
+      ['"%"', '"Y=Q="'].each do |wire|
+        protocol = Thrift::JsonProtocol.new(Thrift::MemoryBufferTransport.new(wire))
+
+        expect { protocol.read_json_base64 }.to raise_error(Thrift::ProtocolException, "Invalid Base64 data") do |error|
+          expect(error.type).to eq(Thrift::ProtocolException::INVALID_DATA)
+        end
+      end
     end
 
     it "should is json numeric" do
@@ -356,7 +705,7 @@ describe 'JsonProtocol' do
 
     it "should read json integer" do
       @trans.write("1.45\"\"")
-      expect {@prot.read_json_integer}.to raise_error(Thrift::ProtocolException)
+      expect { @prot.read_json_integer }.to raise_error(Thrift::ProtocolException)
       @prot.read_string
 
       @trans.write("1453T")
@@ -365,11 +714,11 @@ describe 'JsonProtocol' do
 
     it "should read json double" do
       @trans.write("1.45e3e01\"\"")
-      expect {@prot.read_json_double}.to raise_error(Thrift::ProtocolException)
+      expect { @prot.read_json_double }.to raise_error(Thrift::ProtocolException)
       @prot.read_string
 
       @trans.write("\"1.453e01\"")
-      expect {@prot.read_json_double}.to raise_error(Thrift::ProtocolException)
+      expect { @prot.read_json_double }.to raise_error(Thrift::ProtocolException)
 
       @trans.write("1.453e01\"\"")
       expect(@prot.read_json_double).to eq(14.53)
@@ -379,10 +728,10 @@ describe 'JsonProtocol' do
       expect(@prot.read_json_double.nan?).to eq(true)
 
       @trans.write("\"Infinity\"")
-      expect(@prot.read_json_double).to eq(+1.0/0.0)
+      expect(@prot.read_json_double).to eq(+1.0 / 0.0)
 
       @trans.write("\"-Infinity\"")
-      expect(@prot.read_json_double).to eq(-1.0/0.0)
+      expect(@prot.read_json_double).to eq(-1.0 / 0.0)
     end
 
     it "should read json object start" do
@@ -407,7 +756,7 @@ describe 'JsonProtocol' do
 
     it "should read_message_begin" do
       @trans.write("[2,")
-      expect {@prot.read_message_begin}.to raise_error(Thrift::ProtocolException)
+      expect { @prot.read_message_begin }.to raise_error(Thrift::ProtocolException)
 
       @trans.write("[1,\"name\",12,32\"\"")
       expect(@prot.read_message_begin).to eq(["name", 12, 32])
@@ -443,6 +792,13 @@ describe 'JsonProtocol' do
       expect(@prot.read_map_begin).to eq([12, 15, 2])
     end
 
+    it "should reject a negative map size" do
+      @trans.write("[\"rec\",\"lst\",-1,{")
+      expect { @prot.read_map_begin }.to raise_error(Thrift::ProtocolException, "Negative size") do |e|
+        expect(e.type).to eq(Thrift::ProtocolException::NEGATIVE_SIZE)
+      end
+    end
+
     it "should read map end" do
       @trans.write("}]")
       expect(@prot.read_map_end).to eq(nil)
@@ -451,6 +807,13 @@ describe 'JsonProtocol' do
     it "should read list begin" do
       @trans.write("[\"rec\",2\"\"")
       expect(@prot.read_list_begin).to eq([12, 2])
+    end
+
+    it "should reject a negative list size" do
+      @trans.write("[\"rec\",-1\"\"")
+      expect { @prot.read_list_begin }.to raise_error(Thrift::ProtocolException, "Negative size") do |e|
+        expect(e.type).to eq(Thrift::ProtocolException::NEGATIVE_SIZE)
+      end
     end
 
     it "should read list end" do
@@ -463,9 +826,37 @@ describe 'JsonProtocol' do
       expect(@prot.read_set_begin).to eq([12, 2])
     end
 
+    it "should reject a negative set size" do
+      @trans.write("[\"rec\",-1\"\"")
+      expect { @prot.read_set_begin }.to raise_error(Thrift::ProtocolException, "Negative size") do |e|
+        expect(e.type).to eq(Thrift::ProtocolException::NEGATIVE_SIZE)
+      end
+    end
+
     it "should read set end" do
       @trans.write("]")
       expect(@prot.read_set_end).to eq(nil)
+    end
+
+    it "should skip unknown string fields without base64 decoding" do
+      prot = Thrift::JsonProtocol.new(Thrift::MemoryBufferTransport.new('{"2":{"str":"%"}}'))
+      hello = SpecNamespace::Hello.new
+
+      expect {
+        hello.read(prot)
+      }.not_to raise_error
+      expect(hello.greeting).to eq("hello world")
+    end
+
+    it "should skip unknown string fields through protocol decorators" do
+      trans = Thrift::MemoryBufferTransport.new('{"2":{"str":"%"}}')
+      prot = Thrift::MultiplexedProtocol.new(Thrift::JsonProtocol.new(trans), "service")
+      hello = SpecNamespace::Hello.new
+
+      expect {
+        hello.read(prot)
+      }.not_to raise_error
+      expect(hello.greeting).to eq("hello world")
     end
 
     it "should read bool" do
@@ -502,15 +893,15 @@ describe 'JsonProtocol' do
       expect(@prot.read_double).to eq(12.23)
     end
 
-    it 'should read string' do
-      @trans.write('"this is a test string"'.force_encoding(Encoding::BINARY))
+    it "should read string" do
+      @trans.write('"this is a test string"'.b)
       a = @prot.read_string
-      expect(a).to eq('this is a test string')
+      expect(a).to eq("this is a test string")
       expect(a.encoding).to eq(Encoding::UTF_8)
     end
 
-    it 'should read string with unicode characters' do
-      @trans.write('"this is a test string with unicode characters: \u20AC \u20AD"'.force_encoding(Encoding::BINARY))
+    it "should read string with unicode characters" do
+      @trans.write('"this is a test string with unicode characters: \u20AC \u20AD"'.b)
       a = @prot.read_string
       expect(a).to eq("this is a test string with unicode characters: \u20AC \u20AD")
       expect(a.encoding).to eq(Encoding::UTF_8)

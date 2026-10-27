@@ -48,7 +48,7 @@ final class TJsonProtocol(Transport = TTransport) if (
    *   stringSizeLimit = If positive, the string length is limited to the
    *     given number of bytes.
    */
-  this(Transport trans, int containerSizeLimit = 0, int stringSizeLimit = 0) {
+  this(Transport trans, int containerSizeLimit = DEFAULT_CONTAINER_SIZE_LIMIT, int stringSizeLimit = DEFAULT_STRING_SIZE_LIMIT) {
     trans_ = trans;
     this.containerSizeLimit = containerSizeLimit;
     this.stringSizeLimit = stringSizeLimit;
@@ -75,7 +75,7 @@ final class TJsonProtocol(Transport = TTransport) if (
    * data is received. If the limit is exceeded, a SIZE_LIMIT-type
    * TProtocolException is thrown.
    *
-   * Defaults to zero (no limit).
+   * Defaults to DEFAULT_CONTAINER_SIZE_LIMIT.
    */
   int containerSizeLimit;
 
@@ -90,7 +90,7 @@ final class TJsonProtocol(Transport = TTransport) if (
    * Note: For binary data, the limit applies to the length of the
    * Base64-encoded string data, not the resulting byte array.
    *
-   * Defaults to zero (no limit).
+   * Defaults to DEFAULT_STRING_SIZE_LIMIT.
    */
   int stringSizeLimit;
 
@@ -566,12 +566,17 @@ private:
   // a valid Json numeric character.
   string readJsonNumericChars() {
     string str;
+    int bytesRead;
     while (true) {
       auto ch = reader_.peek();
       if (!isJsonNumeric(ch[0])) {
         break;
       }
       reader_.read();
+      ++bytesRead;
+      if (stringSizeLimit > 0 && bytesRead > stringSizeLimit) {
+        throw new TProtocolException(TProtocolException.Type.SIZE_LIMIT);
+      }
       str ~= ch;
     }
     return str;
@@ -760,10 +765,10 @@ private:
  * TJsonProtocol construction helper to avoid having to explicitly specify
  * the transport type, i.e. to allow the constructor being called using IFTI
  * (see $(LINK2 http://d.puremagic.com/issues/show_bug.cgi?id=6082, D Bugzilla
- * enhancement requet 6082)).
+ * enhancement request 6082)).
  */
 TJsonProtocol!Transport tJsonProtocol(Transport)(Transport trans,
-  int containerSizeLimit = 0, int stringSizeLimit = 0
+  int containerSizeLimit = DEFAULT_CONTAINER_SIZE_LIMIT, int stringSizeLimit = DEFAULT_STRING_SIZE_LIMIT
 ) if (isTTransport!Transport) {
   return new TJsonProtocol!Transport(trans, containerSizeLimit, stringSizeLimit);
 }
@@ -830,6 +835,73 @@ unittest {
   import thrift.internal.test.protocol;
   testContainerSizeLimit!(TJsonProtocol!())();
   testStringSizeLimit!(TJsonProtocol!())();
+  testSizeLimitDefaults!(TJsonProtocol!())();
+  testFactorySizeLimits!(TJsonProtocol!(), TJsonProtocolFactory!())();
+  testSkipDepthLimit!(TJsonProtocol!())();
+}
+
+unittest {
+  // readJsonNumericChars() accumulates numeric-class characters from the wire.
+  // Like the quoted-string reader in this protocol, the run is held to
+  // stringSizeLimit, so an over-long number is refused with a SIZE_LIMIT
+  // exception instead of growing the buffer without limit.
+  import std.array : replicate;
+  import std.exception;
+  import thrift.transport.memory;
+
+  enum limit = 16;
+  enum count = 4096; // far more numeric characters than the limit
+
+  // A run past the limit is refused, and the reader stops at the cap rather
+  // than draining the whole run off the transport: only (limit + 1) bytes are
+  // taken before the refusal, so the rest and the trailing delimiter stay
+  // unread.
+  {
+    auto buffer = new TMemoryBuffer(cast(ubyte[])(replicate("1", count) ~ ","));
+    auto json = tJsonProtocol(buffer);
+    json.stringSizeLimit = limit;
+
+    auto e = cast(TProtocolException)collectException(json.readJsonNumericChars());
+    enforce(e && e.type == TProtocolException.Type.SIZE_LIMIT,
+      "an over-long numeric run must be refused with SIZE_LIMIT");
+    enforce(buffer.getContents().length == (count + 1) - (limit + 1),
+      "the numeric reader must stop at the cap, not drain the run");
+  }
+
+  // A run no longer than the limit is accumulated in full (off-by-one guard).
+  {
+    auto buffer = new TMemoryBuffer(cast(ubyte[])(replicate("1", limit) ~ ","));
+    auto json = tJsonProtocol(buffer);
+    json.stringSizeLimit = limit;
+    enforce(json.readJsonNumericChars() == replicate("1", limit),
+      "a numeric run no longer than the limit must be accepted");
+  }
+
+  // The limit reaches the public integer read path as well.
+  {
+    auto buffer = new TMemoryBuffer(cast(ubyte[])(replicate("9", count) ~ ","));
+    auto json = tJsonProtocol(buffer);
+    json.stringSizeLimit = limit;
+    auto e = cast(TProtocolException)collectException(json.readI64());
+    enforce(e && e.type == TProtocolException.Type.SIZE_LIMIT,
+      "readI64 must apply the numeric size limit");
+  }
+
+  // Ordinary numbers still read with the default limit in force. The trailing
+  // delimiter stands in for the separator that follows a number in a JSON
+  // array, at which the numeric scan stops.
+  {
+    auto buffer = new TMemoryBuffer(cast(ubyte[])"1234567890,");
+    auto json = tJsonProtocol(buffer);
+    enforce(json.readI64() == 1234567890,
+      "an ordinary integer must still read under the default limit");
+  }
+  {
+    auto buffer = new TMemoryBuffer(cast(ubyte[])"2.5,");
+    auto json = tJsonProtocol(buffer);
+    enforce(json.readDouble() == 2.5,
+      "an ordinary double must still read under the default limit");
+  }
 }
 
 /**
@@ -845,17 +917,27 @@ unittest {
 class TJsonProtocolFactory(Transports...) if (
   allSatisfy!(isTTransport, Transports)
 ) : TProtocolFactory {
+  ///
+  this(int containerSizeLimit = DEFAULT_CONTAINER_SIZE_LIMIT, int stringSizeLimit = DEFAULT_STRING_SIZE_LIMIT) {
+    containerSizeLimit_ = containerSizeLimit;
+    stringSizeLimit_ = stringSizeLimit;
+  }
+
   TProtocol getProtocol(TTransport trans) const {
     foreach (Transport; TypeTuple!(Transports, TTransport)) {
       auto concreteTrans = cast(Transport)trans;
       if (concreteTrans) {
-        auto p = new TJsonProtocol!Transport(concreteTrans);
+        auto p = new TJsonProtocol!Transport(concreteTrans,
+          containerSizeLimit_, stringSizeLimit_);
         return p;
       }
     }
     throw new TProtocolException(
       "Passed null transport to TJsonProtocolFactoy.");
   }
+
+  int containerSizeLimit_;
+  int stringSizeLimit_;
 }
 
 private {

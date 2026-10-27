@@ -18,9 +18,11 @@
 #
 
 from .TProtocol import (TType, TProtocolBase, TProtocolException,
-                        TProtocolFactory, checkIntegerLimits)
+                        TProtocolFactory, checkIntegerLimits,
+                        DEFAULT_STRING_LENGTH_LIMIT)
 import base64
 import math
+import uuid
 
 
 __all__ = ['TJSONProtocol',
@@ -64,6 +66,7 @@ ESCAPE_CHARS = {
 }
 NUMERIC_CHAR = b'+-.0123456789Ee'
 
+# Type names as TJSONProtocol.cpp
 CTYPES = {
     TType.BOOL: 'tf',
     TType.BYTE: 'i8',
@@ -76,6 +79,7 @@ CTYPES = {
     TType.LIST: 'lst',
     TType.SET: 'set',
     TType.MAP: 'map',
+    TType.UUID: 'uid',
 }
 
 JTYPES = {}
@@ -170,18 +174,24 @@ class LookaheadReader():
 
 class TJSONProtocolBase(TProtocolBase):
 
-    def __init__(self, trans):
+    def __init__(self, trans, string_length_limit=DEFAULT_STRING_LENGTH_LIMIT):
         TProtocolBase.__init__(self, trans)
+        # JSON strings/numbers are delimited, not length-prefixed, so there is no
+        # declared size to reject up front: the peer sets the size of a value by
+        # how much it sends. The per-string limit is enforced as the field is read
+        # (see readJSONString/readJSONNumericChars) and defaults to the same
+        # DEFAULT_STRING_LENGTH_LIMIT as TBinaryProtocol/TCompactProtocol. Pass
+        # string_length_limit=None to read values of any length.
+        self.string_length_limit = string_length_limit
         self.resetWriteContext()
         self.resetReadContext()
 
-    # We don't have length limit implementation for JSON protocols
-    @property
-    def string_length_limit(senf):
-        return None
+    def _check_string_length(self, length):
+        self._check_length(self.string_length_limit, length)
 
+    # A length limit is not implemented for JSON container reads.
     @property
-    def container_length_limit(senf):
+    def container_length_limit(self):
         return None
 
     def resetWriteContext(self):
@@ -269,57 +279,78 @@ class TJSONProtocolBase(TProtocolBase):
     def readJSONString(self, skipContext):
         highSurrogate = None
         string = []
+        length = 0
         if skipContext is False:
             self.context.read()
         self.readJSONSyntaxChar(QUOTE)
-        while True:
-            character = self.reader.read()
-            if character == QUOTE:
-                break
-            if ord(character) == ESCSEQ0:
+        try:
+            while True:
                 character = self.reader.read()
-                if ord(character) == ESCSEQ1:
-                    character = self.trans.read(4).decode('ascii')
-                    codeunit = int(character, 16)
-                    if self._isHighSurrogate(codeunit):
-                        if highSurrogate:
-                            raise TProtocolException(
-                                TProtocolException.INVALID_DATA,
-                                "Expected low surrogate char")
-                        highSurrogate = codeunit
-                        continue
-                    elif self._isLowSurrogate(codeunit):
-                        if not highSurrogate:
-                            raise TProtocolException(
-                                TProtocolException.INVALID_DATA,
-                                "Expected high surrogate char")
-                        character = self._toChar(highSurrogate, codeunit)
-                        highSurrogate = None
+                length += 1
+                if character == QUOTE:
+                    break
+                if ord(character) == ESCSEQ0:
+                    character = self.reader.read()
+                    length += 1
+                    if ord(character) == ESCSEQ1:
+                        character = self.trans.read(4).decode('ascii')
+                        length += 4
+                        codeunit = int(character, 16)
+                        if self._isHighSurrogate(codeunit):
+                            if highSurrogate:
+                                raise TProtocolException(
+                                    TProtocolException.INVALID_DATA,
+                                    "Expected low surrogate char")
+                            highSurrogate = codeunit
+                            continue
+                        elif self._isLowSurrogate(codeunit):
+                            if not highSurrogate:
+                                raise TProtocolException(
+                                    TProtocolException.INVALID_DATA,
+                                    "Expected high surrogate char")
+                            character = self._toChar(highSurrogate, codeunit)
+                            highSurrogate = None
+                        else:
+                            character = self._toChar(codeunit)
                     else:
-                        character = self._toChar(codeunit)
+                        if character not in ESCAPE_CHARS:
+                            raise TProtocolException(
+                                TProtocolException.INVALID_DATA,
+                                "Expected control char")
+                        character = ESCAPE_CHARS[character]
+                elif character in ESCAPE_CHAR_VALS:
+                    raise TProtocolException(TProtocolException.INVALID_DATA,
+                                             "Unescaped control char")
                 else:
-                    if character not in ESCAPE_CHARS:
-                        raise TProtocolException(
-                            TProtocolException.INVALID_DATA,
-                            "Expected control char")
-                    character = ESCAPE_CHARS[character]
-            elif character in ESCAPE_CHAR_VALS:
-                raise TProtocolException(TProtocolException.INVALID_DATA,
-                                         "Unescaped control char")
-            else:
-                utf8_bytes = bytearray([ord(character)])
-                while ord(self.reader.peek()) >= 0x80:
-                    utf8_bytes.append(ord(self.reader.read()))
-                character = utf8_bytes.decode('utf-8')
-            string.append(character)
+                    utf8_bytes = bytearray([ord(character)])
+                    while ord(self.reader.peek()) >= 0x80:
+                        utf8_bytes.append(ord(self.reader.read()))
+                        length += 1
+                        # A run of continuation bytes is consumed in this inner loop,
+                        # so bound it here too rather than only once per character.
+                        self._check_string_length(length)
+                    character = utf8_bytes.decode('utf-8')
+                string.append(character)
+                self._check_string_length(length)
 
-            if highSurrogate:
-                raise TProtocolException(TProtocolException.INVALID_DATA,
-                                         "Expected low surrogate char")
+                if highSurrogate:
+                    raise TProtocolException(TProtocolException.INVALID_DATA,
+                                             "Expected low surrogate char")
+        except (TypeError, ValueError, IndexError):
+            # A truncated or malformed string body -- EOF mid-character (ord(b'') ->
+            # TypeError), a bad \uXXXX escape (int()/decode() -> ValueError), or an
+            # invalid UTF-8 run -- otherwise escapes as a raw Python error. Report it
+            # as a protocol error, like every explicit check in this reader. The
+            # explicit TProtocolException raises above are not of these types, so they
+            # propagate unchanged.
+            raise TProtocolException(TProtocolException.INVALID_DATA,
+                                     "Malformed or truncated JSON string")
         return ''.join(string)
 
     def isJSONNumeric(self, character):
-        return (True if NUMERIC_CHAR.find(character) != - 1 else False)
+        # A read at the end of the input returns b'', and NUMERIC_CHAR.find(b'')
+        # is 0, so guard against it: only a single byte can be a numeric char.
+        return (True if len(character) == 1 and NUMERIC_CHAR.find(character) != -1 else False)
 
     def readJSONQuotes(self):
         if (self.context.escapeNum()):
@@ -327,11 +358,14 @@ class TJSONProtocolBase(TProtocolBase):
 
     def readJSONNumericChars(self):
         numeric = []
+        length = 0
         while True:
             character = self.reader.peek()
             if self.isJSONNumeric(character) is False:
                 break
             numeric.append(self.reader.read())
+            length += 1
+            self._check_string_length(length)
         return b''.join(numeric).decode('ascii')
 
     def readJSONInteger(self):
@@ -378,7 +412,12 @@ class TJSONProtocolBase(TProtocolBase):
         if m != 0:
             for i in range(4 - m):
                 string += '='
-        return base64.b64decode(string)
+        try:
+            return base64.b64decode(string)
+        except ValueError:
+            # binascii.Error (a ValueError subclass) for a non-base64 / non-ASCII body.
+            raise TProtocolException(TProtocolException.INVALID_DATA,
+                                     "Invalid base64 data")
 
     def readJSONObjectStart(self):
         self.context.read()
@@ -421,6 +460,15 @@ class TJSONProtocol(TJSONProtocolBase):
     def readStructEnd(self):
         self.readJSONObjectEnd()
 
+    def _jtype(self, name):
+        # A field/element type code read off the wire; an unknown code is a
+        # malformed message, not a KeyError.
+        try:
+            return JTYPES[name]
+        except KeyError:
+            raise TProtocolException(TProtocolException.INVALID_DATA,
+                                     "Unknown JSON protocol type id")
+
     def readFieldBegin(self):
         character = self.reader.peek()
         ttype = 0
@@ -430,7 +478,7 @@ class TJSONProtocol(TJSONProtocolBase):
         else:
             id = self.readJSONInteger()
             self.readJSONObjectStart()
-            ttype = JTYPES[self.readJSONString(False)]
+            ttype = self._jtype(self.readJSONString(False))
         return (None, ttype, id)
 
     def readFieldEnd(self):
@@ -438,8 +486,8 @@ class TJSONProtocol(TJSONProtocolBase):
 
     def readMapBegin(self):
         self.readJSONArrayStart()
-        keyType = JTYPES[self.readJSONString(False)]
-        valueType = JTYPES[self.readJSONString(False)]
+        keyType = self._jtype(self.readJSONString(False))
+        valueType = self._jtype(self.readJSONString(False))
         size = self.readJSONInteger()
         self.readJSONObjectStart()
         return (keyType, valueType, size)
@@ -450,7 +498,7 @@ class TJSONProtocol(TJSONProtocolBase):
 
     def readCollectionBegin(self):
         self.readJSONArrayStart()
-        elemType = JTYPES[self.readJSONString(False)]
+        elemType = self._jtype(self.readJSONString(False))
         size = self.readJSONInteger()
         return (elemType, size)
     readListBegin = readCollectionBegin
@@ -479,6 +527,11 @@ class TJSONProtocol(TJSONProtocolBase):
 
     def readBinary(self):
         return self.readJSONBase64()
+
+    def readUuid(self):
+        buff = self.readJSONString(False)
+        val = uuid.UUID(buff)
+        return val
 
     def writeMessageBegin(self, name, request_type, seqid):
         self.resetWriteContext()
@@ -565,17 +618,20 @@ class TJSONProtocol(TJSONProtocolBase):
     def writeBinary(self, binary):
         self.writeJSONBase64(binary)
 
+    def writeUuid(self, uuid):
+        self.writeJSONString(str(uuid))
+
 
 class TJSONProtocolFactory(TProtocolFactory):
+    def __init__(self, string_length_limit=DEFAULT_STRING_LENGTH_LIMIT):
+        self.string_length_limit = string_length_limit
+
     def getProtocol(self, trans):
-        return TJSONProtocol(trans)
+        return TJSONProtocol(trans, string_length_limit=self.string_length_limit)
 
+    # A length limit is not implemented for JSON container reads.
     @property
-    def string_length_limit(senf):
-        return None
-
-    @property
-    def container_length_limit(senf):
+    def container_length_limit(self):
         return None
 
 
@@ -658,6 +714,9 @@ class TSimpleJSONProtocol(TJSONProtocolBase):
 
     def writeBinary(self, binary):
         self.writeJSONBase64(binary)
+
+    def writeUuid(self, uuid):
+        self.writeJSONString(str(uuid))
 
 
 class TSimpleJSONProtocolFactory(TProtocolFactory):

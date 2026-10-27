@@ -192,20 +192,30 @@ private:
                                   string prefix,
                                   string suffix,
                                   int error_ret,
-                                  bool allocate = true);
+                                  bool allocate = true,
+                                  vector<string> cleanup = vector<string>());
   void generate_deserialize_struct(ostream& out,
                                    t_struct* tstruct,
                                    string prefix,
                                    int error_ret,
-                                   bool allocate = true);
-  void generate_deserialize_container(ostream& out, t_type* ttype, string prefix, int error_ret);
-  void generate_deserialize_map_element(ostream& out, t_map* tmap, string prefix, int error_ret);
-  void generate_deserialize_set_element(ostream& out, t_set* tset, string prefix, int error_ret);
+                                   bool allocate = true,
+                                   vector<string> cleanup = vector<string>());
+  void generate_deserialize_container(ostream& out, t_type* ttype, string prefix, int error_ret,
+                                      vector<string> cleanup = vector<string>());
+  void generate_deserialize_map_element(ostream& out, t_map* tmap, string prefix, int error_ret,
+                                        vector<string> cleanup = vector<string>());
+  void generate_deserialize_set_element(ostream& out, t_set* tset, string prefix, int error_ret,
+                                        vector<string> cleanup = vector<string>());
   void generate_deserialize_list_element(ostream& out,
                                          t_list* tlist,
                                          string prefix,
                                          string index,
-                                         int error_ret);
+                                         int error_ret,
+                                         vector<string> cleanup = vector<string>());
+  /* Releases a partially built container element on a read failure. */
+  std::string generate_free_field(t_type* ttype, string name, bool for_hash_table);
+  void generate_deserialize_error_return(ostream& out, int error_ret,
+                                          const vector<string>& cleanup);
 
   string generate_new_hash_from_type(t_type* key, t_type* value);
   string generate_new_array_from_type(t_type* ttype);
@@ -2594,8 +2604,8 @@ void t_c_glib_generator::generate_service_processor(t_service* tservice) {
   f_service_ << indent() << parent_class_name << "Class "
                                                  "*parent_class =" << '\n';
   indent_up();
-  f_service_ << indent() << "g_type_class_peek_parent (" << class_name_uc << "_GET_CLASS (self));"
-             << '\n';
+  f_service_ << indent() << "g_type_class_peek_parent (g_type_class_peek ("
+             << class_name_lc << "_get_type ()));" << '\n';
   indent_down();
   f_service_ << '\n'
              << indent() << "process_function_def = "
@@ -2758,14 +2768,9 @@ void t_c_glib_generator::generate_service_processor(t_service* tservice) {
              << "gobject_class->finalize = " << class_name_lc << "_finalize;" << '\n' << indent()
              << "gobject_class->set_property = " << class_name_lc << "_set_property;" << '\n'
              << indent() << "gobject_class->get_property = " << class_name_lc << "_get_property;"
-             << '\n' << '\n';
-
-  if (extends_service) {
-    f_service_ << indent() << "dispatch_processor_class->dispatch_call = " << class_name_lc
-               << "_dispatch_call;" << '\n';
-  }
-
-  f_service_ << indent() << "cls->dispatch_call = " << class_name_lc << "_dispatch_call;"
+             << '\n' << '\n' << indent()
+             << "dispatch_processor_class->dispatch_call = " << class_name_lc << "_dispatch_call;"
+             << '\n' << indent() << "cls->dispatch_call = " << class_name_lc << "_dispatch_call;"
              << '\n' << '\n' << indent() << "param_spec = g_param_spec_object (\"handler\","
              << '\n';
   args_indent = indent() + string(34, ' ');
@@ -3227,6 +3232,8 @@ void t_c_glib_generator::generate_object(t_struct* tstruct) {
   f_types_impl_ << "}" << '\n' << '\n';
 
   /* create the destructor */
+  f_types_impl_ << "static gpointer " << class_name_lc << "_parent_class = NULL;" << '\n' << '\n';
+
   f_types_impl_ << "static void " << '\n' << this->nspace_lc << name_u
                 << "_finalize (GObject *object)" << '\n' << "{" << '\n';
   indent_up();
@@ -3308,6 +3315,10 @@ void t_c_glib_generator::generate_object(t_struct* tstruct) {
     }
   }
 
+  f_types_impl_ << '\n'
+                << indent() << "G_OBJECT_CLASS (" << class_name_lc
+                << "_parent_class)->finalize (object);" << '\n';
+
   indent_down();
   f_types_impl_ << "}" << '\n' << '\n';
 
@@ -3319,9 +3330,14 @@ void t_c_glib_generator::generate_object(t_struct* tstruct) {
 
   f_types_impl_ << indent() << "GObjectClass *gobject_class = G_OBJECT_CLASS (cls);" << '\n'
                 << indent() << "ThriftStructClass *struct_class = "
-                << "THRIFT_STRUCT_CLASS (cls);" << '\n' << '\n' << indent()
-                << "struct_class->read = " << class_name_lc << "_read;" << '\n' << indent()
-                << "struct_class->write = " << class_name_lc << "_write;" << '\n' << '\n'
+                << "THRIFT_STRUCT_CLASS (cls);" << '\n'
+                << '\n'
+                << indent() << class_name_lc << "_parent_class = g_type_class_peek_parent (cls);"
+                << '\n'
+                << '\n'
+                << indent() << "struct_class->read = " << class_name_lc << "_read;" << '\n'
+                << indent() << "struct_class->write = " << class_name_lc << "_write;" << '\n'
+                << '\n'
                 << indent() << "gobject_class->finalize = " << class_name_lc << "_finalize;"
                 << '\n';
   if (members.size() > 0) {
@@ -4003,12 +4019,65 @@ void t_c_glib_generator::generate_serialize_list_element(ostream& out,
 }
 
 /* deserializes a field of any type. */
+/* Returns a statement that releases the container-element temporary NAME of
+   type TTYPE, matching how declare_local_variable allocated it, or an empty
+   string when nothing needs to be released. FOR_HASH_TABLE mirrors the flag
+   passed to declare_local_variable (map and set elements), where an enum
+   temporary is stored by value rather than as an allocation. */
+string t_c_glib_generator::generate_free_field(t_type* ttype, string name, bool for_hash_table) {
+  ttype = get_true_type(ttype);
+
+  if (for_hash_table && ttype->is_enum()) {
+    return "";
+  } else if (ttype->is_map() || ttype->is_set()) {
+    return "if (" + name + " != NULL) thrift_safe_hash_table_destroy ((GHashTable *) " + name + ");";
+  } else if (ttype->is_list()) {
+    t_type* etype = get_true_type(((t_list*)ttype)->get_elem_type());
+    string unref = is_numeric(etype) ? "g_array_unref" : "g_ptr_array_unref";
+    return "if (" + name + " != NULL) " + unref + " (" + name + ");";
+  } else if (ttype->is_struct() || ttype->is_xception()) {
+    return "if (" + name + " != NULL) g_object_unref (" + name + ");";
+  } else if (is_numeric(ttype)) {
+    /* numeric (and list-element enum) temporaries are g_new'd, so always set */
+    return "g_free (" + name + ");";
+  } else if (ttype->is_string()) {
+    if (ttype->is_binary()) {
+      return "if (" + name + " != NULL) g_byte_array_free (" + name + ", TRUE);";
+    }
+    return "if (" + name + " != NULL) g_free (" + name + ");";
+  }
+  return "";
+}
+
+/* Emits the error return of a deserialize read that is guarded by a
+   brace-less `if (...)`. With no cleanup this is the historical
+   `  return <error_ret>;`; with cleanup the statements and the return are
+   wrapped in a block so that they are all governed by the guard. */
+void t_c_glib_generator::generate_deserialize_error_return(ostream& out, int error_ret,
+                                                           const vector<string>& cleanup) {
+  if (cleanup.empty()) {
+    indent_up();
+    out << indent() << "return " << error_ret << ";" << '\n';
+    indent_down();
+  } else {
+    out << indent() << "{" << '\n';
+    indent_up();
+    for (vector<string>::const_iterator it = cleanup.begin(); it != cleanup.end(); ++it) {
+      out << indent() << *it << '\n';
+    }
+    out << indent() << "return " << error_ret << ";" << '\n';
+    indent_down();
+    out << indent() << "}" << '\n';
+  }
+}
+
 void t_c_glib_generator::generate_deserialize_field(ostream& out,
                                                     t_field* tfield,
                                                     string prefix,
                                                     string suffix,
                                                     int error_ret,
-                                                    bool allocate) {
+                                                    bool allocate,
+                                                    vector<string> cleanup) {
   t_type* type = get_true_type(tfield->get_type());
 
   if (type->is_void()) {
@@ -4019,9 +4088,9 @@ void t_c_glib_generator::generate_deserialize_field(ostream& out,
   string name = prefix + tfield->get_name() + suffix;
 
   if (type->is_struct() || type->is_xception()) {
-    generate_deserialize_struct(out, (t_struct*)type, name, error_ret, allocate);
+    generate_deserialize_struct(out, (t_struct*)type, name, error_ret, allocate, cleanup);
   } else if (type->is_container()) {
-    generate_deserialize_container(out, type, name, error_ret);
+    generate_deserialize_container(out, type, name, error_ret, cleanup);
   } else if (type->is_base_type()) {
     t_base_type::t_base tbase = ((t_base_type*)type)->get_base();
     if (tbase == t_base_type::TYPE_STRING) {
@@ -4071,8 +4140,8 @@ void t_c_glib_generator::generate_deserialize_field(ostream& out,
       throw "compiler error: no C reader for base type " + t_base_type::t_base_name(tbase) + name;
     }
     out << ", error)) < 0)" << '\n';
-    out << indent() << "  return " << error_ret << ";" << '\n' << indent() << "xfer += ret;"
-        << '\n';
+    generate_deserialize_error_return(out, error_ret, cleanup);
+    out << indent() << "xfer += ret;" << '\n';
 
     // load the byte array with the data
     if (tbase == t_base_type::TYPE_STRING && type->is_binary()) {
@@ -4083,8 +4152,9 @@ void t_c_glib_generator::generate_deserialize_field(ostream& out,
   } else if (type->is_enum()) {
     string t = tmp("ecast");
     out << indent() << "gint32 " << t << ";" << '\n' << indent()
-        << "if ((ret = thrift_protocol_read_i32 (protocol, &" << t << ", error)) < 0)" << '\n'
-        << indent() << "  return " << error_ret << ";" << '\n' << indent() << "xfer += ret;" << '\n'
+        << "if ((ret = thrift_protocol_read_i32 (protocol, &" << t << ", error)) < 0)" << '\n';
+    generate_deserialize_error_return(out, error_ret, cleanup);
+    out << indent() << "xfer += ret;" << '\n'
         << indent() << name << " = (" << type_name(type) << ")" << t << ";" << '\n';
   } else {
     throw std::logic_error("DO NOT KNOW HOW TO SERIALIZE FIELD '" + tfield->get_name() + "' TYPE '"
@@ -4105,7 +4175,8 @@ void t_c_glib_generator::generate_deserialize_struct(ostream& out,
                                                      t_struct* tstruct,
                                                      string prefix,
                                                      int error_ret,
-                                                     bool allocate) {
+                                                     bool allocate,
+                                                     vector<string> cleanup) {
   string name_uc = to_upper_case(initial_caps_to_underscores(tstruct->get_name()));
   if (tstruct->is_xception()) {
     out << indent() << "/* This struct is an exception */" << '\n';
@@ -4125,9 +4196,10 @@ void t_c_glib_generator::generate_deserialize_struct(ostream& out,
   indent_up();
   if (allocate) {
     indent(out) << "g_object_unref (" << prefix << ");" << '\n';
-    if (tstruct->is_xception()) {
-      indent(out) << prefix << " = NULL;" << '\n';
-    }
+    indent(out) << prefix << " = NULL;" << '\n';
+  }
+  for (vector<string>::const_iterator it = cleanup.begin(); it != cleanup.end(); ++it) {
+    indent(out) << *it << '\n';
   }
   out << indent() << "return " << error_ret << ";" << '\n';
   indent_down();
@@ -4137,7 +4209,8 @@ void t_c_glib_generator::generate_deserialize_struct(ostream& out,
 void t_c_glib_generator::generate_deserialize_container(ostream& out,
                                                         t_type* ttype,
                                                         string prefix,
-                                                        int error_ret) {
+                                                        int error_ret,
+                                                        vector<string> cleanup) {
   scope_up(out);
 
   if (ttype->is_map()) {
@@ -4149,9 +4222,7 @@ void t_c_glib_generator::generate_deserialize_container(ostream& out,
         << indent() << "/* read the map begin marker */" << '\n'
         << indent() << "if ((ret = thrift_protocol_read_map_begin (protocol, "
            "&key_type, &value_type, &size, error)) < 0)" << '\n';
-    indent_up();
-    out << indent() << "return " << error_ret << ";" << '\n';
-    indent_down();
+    generate_deserialize_error_return(out, error_ret, cleanup);
     out << indent() << "xfer += ret;" << '\n'
         << '\n';
 
@@ -4159,7 +4230,7 @@ void t_c_glib_generator::generate_deserialize_container(ostream& out,
     out << indent() << "/* iterate through each of the map's fields */" << '\n'
         << indent() << "for (i = 0; i < size; i++)" << '\n';
     scope_up(out);
-    generate_deserialize_map_element(out, (t_map*)ttype, prefix, error_ret);
+    generate_deserialize_map_element(out, (t_map*)ttype, prefix, error_ret, cleanup);
     scope_down(out);
     out << '\n';
 
@@ -4167,9 +4238,7 @@ void t_c_glib_generator::generate_deserialize_container(ostream& out,
     out << indent() << "/* read the map end marker */" << '\n'
         << indent() << "if ((ret = thrift_protocol_read_map_end (protocol, "
            "error)) < 0)" << '\n';
-    indent_up();
-    out << indent() << "return " << error_ret << ";" << '\n';
-    indent_down();
+    generate_deserialize_error_return(out, error_ret, cleanup);
     out << indent() << "xfer += ret;" << '\n';
   } else if (ttype->is_set()) {
     out << indent() << "guint32 size;" << '\n'
@@ -4178,9 +4247,7 @@ void t_c_glib_generator::generate_deserialize_container(ostream& out,
         << '\n'
         << indent() << "if ((ret = thrift_protocol_read_set_begin (protocol, "
            "&element_type, &size, error)) < 0)" << '\n';
-    indent_up();
-    out << indent() << "return " << error_ret << ";" << '\n';
-    indent_down();
+    generate_deserialize_error_return(out, error_ret, cleanup);
     out << indent() << "xfer += ret;" << '\n'
         << '\n';
 
@@ -4188,15 +4255,13 @@ void t_c_glib_generator::generate_deserialize_container(ostream& out,
     out << indent() << "/* iterate through the set elements */" << '\n'
         << indent() << "for (i = 0; i < size; ++i)" << '\n';
     scope_up(out);
-    generate_deserialize_set_element(out, (t_set*)ttype, prefix, error_ret);
+    generate_deserialize_set_element(out, (t_set*)ttype, prefix, error_ret, cleanup);
     scope_down(out);
 
     // read set end
     out << indent() << "if ((ret = thrift_protocol_read_set_end (protocol, "
            "error)) < 0)" << '\n';
-    indent_up();
-    out << indent() << "return " << error_ret << ";" << '\n';
-    indent_down();
+    generate_deserialize_error_return(out, error_ret, cleanup);
     out << indent() << "xfer += ret;" << '\n'
         << '\n';
   } else if (ttype->is_list()) {
@@ -4206,9 +4271,7 @@ void t_c_glib_generator::generate_deserialize_container(ostream& out,
         << '\n'
         << indent() << "if ((ret = thrift_protocol_read_list_begin (protocol, "
            "&element_type,&size, error)) < 0)" << '\n';
-    indent_up();
-    out << indent() << "return " << error_ret << ";" << '\n';
-    indent_down();
+    generate_deserialize_error_return(out, error_ret, cleanup);
     out << indent() << "xfer += ret;" << '\n'
         << '\n';
 
@@ -4220,15 +4283,14 @@ void t_c_glib_generator::generate_deserialize_container(ostream& out,
                                       (t_list*)ttype,
                                       prefix,
                                       "i",
-                                      error_ret);
+                                      error_ret,
+                                      cleanup);
     scope_down(out);
 
     // read list end
     out << indent() << "if ((ret = thrift_protocol_read_list_end (protocol, "
            "error)) < 0)" << '\n';
-    indent_up();
-    out << indent() << "return " << error_ret << ";" << '\n';
-    indent_down();
+    generate_deserialize_error_return(out, error_ret, cleanup);
     out << indent() << "xfer += ret;" << '\n';
   }
 
@@ -4272,7 +4334,8 @@ void t_c_glib_generator::declore_local_variable_for_write(ostream& out,
 void t_c_glib_generator::generate_deserialize_map_element(ostream& out,
                                                           t_map* tmap,
                                                           string prefix,
-                                                          int error_ret) {
+                                                          int error_ret,
+                                                          vector<string> cleanup) {
   t_type* tkey = tmap->get_key_type();
   t_type* tval = tmap->get_val_type();
   string keyname = tmp("key");
@@ -4290,11 +4353,22 @@ void t_c_glib_generator::generate_deserialize_map_element(ostream& out,
   string tkey_ptr = tkey->is_string() || !tkey->is_base_type() ? "" : "*";
   string tval_ptr = tval->is_string() || !tval->is_base_type() ? "" : "*";
 
+  /* A read failure before the element is inserted into the map must release
+     both the key and the value temporary, plus any outer temporaries. */
+  vector<string> element_cleanup;
+  string key_free = generate_free_field(tkey, keyname, true);
+  string val_free = generate_free_field(tval, valname, true);
+  if (!key_free.empty())
+    element_cleanup.push_back(key_free);
+  if (!val_free.empty())
+    element_cleanup.push_back(val_free);
+  element_cleanup.insert(element_cleanup.end(), cleanup.begin(), cleanup.end());
+
   // deserialize the fields of the map element
   t_field fkey(tkey, tkey_ptr + keyname);
-  generate_deserialize_field(out, &fkey, "", "", error_ret);
+  generate_deserialize_field(out, &fkey, "", "", error_ret, true, element_cleanup);
   t_field fval(tval, tval_ptr + valname);
-  generate_deserialize_field(out, &fval, "", "", error_ret);
+  generate_deserialize_field(out, &fval, "", "", error_ret, true, element_cleanup);
 
   indent(out) << "if (" << prefix << " && " << keyname << ")" << '\n';
   indent_up();
@@ -4306,7 +4380,8 @@ void t_c_glib_generator::generate_deserialize_map_element(ostream& out,
 void t_c_glib_generator::generate_deserialize_set_element(ostream& out,
                                                           t_set* tset,
                                                           string prefix,
-                                                          int error_ret) {
+                                                          int error_ret,
+                                                          vector<string> cleanup) {
   t_type* telem = tset->get_elem_type();
   string elem = tmp("_elem");
 
@@ -4315,8 +4390,16 @@ void t_c_glib_generator::generate_deserialize_set_element(ostream& out,
   telem = get_true_type(telem);
   string telem_ptr = telem->is_string() || !telem->is_base_type() ? "" : "*";
 
+  /* A read failure before the element is inserted into the set must release
+     the element temporary, plus any outer temporaries. */
+  vector<string> element_cleanup;
+  string elem_free = generate_free_field(telem, elem, true);
+  if (!elem_free.empty())
+    element_cleanup.push_back(elem_free);
+  element_cleanup.insert(element_cleanup.end(), cleanup.begin(), cleanup.end());
+
   t_field felem(telem, telem_ptr + elem);
-  generate_deserialize_field(out, &felem, "", "", error_ret);
+  generate_deserialize_field(out, &felem, "", "", error_ret, true, element_cleanup);
 
   indent(out) << "if (" << prefix << " && " << elem << ")" << '\n';
   indent_up();
@@ -4329,7 +4412,8 @@ void t_c_glib_generator::generate_deserialize_list_element(ostream& out,
                                                            t_list* tlist,
                                                            string prefix,
                                                            string index,
-                                                           int error_ret) {
+                                                           int error_ret,
+                                                           vector<string> cleanup) {
   (void)index;
   t_type* ttype = get_true_type(tlist->get_elem_type());
   string elem = tmp("_elem");
@@ -4337,8 +4421,16 @@ void t_c_glib_generator::generate_deserialize_list_element(ostream& out,
 
   declare_local_variable(out, ttype, elem, false);
 
+  /* A read failure before the element is appended to the list must release
+     the element temporary, plus any outer temporaries. */
+  vector<string> element_cleanup;
+  string elem_free = generate_free_field(ttype, elem, false);
+  if (!elem_free.empty())
+    element_cleanup.push_back(elem_free);
+  element_cleanup.insert(element_cleanup.end(), cleanup.begin(), cleanup.end());
+
   t_field felem(ttype, telem_ptr + elem);
-  generate_deserialize_field(out, &felem, "", "", error_ret);
+  generate_deserialize_field(out, &felem, "", "", error_ret, true, element_cleanup);
 
   if (ttype->is_void()) {
     throw std::runtime_error("compiler error: list element type cannot be void");

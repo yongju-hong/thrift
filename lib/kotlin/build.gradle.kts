@@ -29,7 +29,7 @@ repositories { mavenCentral() }
 dependencies {
     implementation(platform("org.jetbrains.kotlin:kotlin-bom"))
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-jdk8:1.10.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-jdk8:1.11.0")
     implementation("org.apache.thrift:libthrift:INCLUDED")
     testImplementation(kotlin("test"))
 }
@@ -79,7 +79,31 @@ tasks {
         group = LifecycleBasePlugin.BUILD_GROUP
     }
 
-    compileKotlin { dependsOn("compileThrift") }
+    task<Exec>("compileThriftRecursion") {
+        val thriftBin =
+            if (hasProperty("thrift.compiler")) {
+                file(property("thrift.compiler")!!)
+            } else {
+                project.rootDir.resolve("../../compiler/cpp/thrift")
+            }
+        val outputDir = layout.buildDirectory.dir("generated-sources")
+        doFirst { mkdir(outputDir) }
+        commandLine =
+            listOf(
+                thriftBin.absolutePath,
+                "-gen",
+                "kotlin",
+                "-out",
+                outputDir.get().toString(),
+                layout.projectDirectory
+                    .file("src/test/resources/RecursionDepthTest.thrift")
+                    .asFile
+                    .absolutePath,
+            )
+        group = LifecycleBasePlugin.BUILD_GROUP
+    }
+
+    compileKotlin { dependsOn("compileThrift", "compileThriftRecursion") }
 }
 
 sourceSets["main"].java { srcDir(layout.buildDirectory.dir("generated-sources")) }

@@ -39,6 +39,7 @@ class TCompactProtocol extends TProtocol {
   static const int TYPE_MASK = 0xE0;
   static const int TYPE_BITS = 0x07;
   static const int TYPE_SHIFT_AMOUNT = 5;
+  static const int MAX_VARINT_BYTES = 10; // ceil(64/7); matches protobuf wire format
   static final TField TSTOP = TField("", TType.STOP, 0);
 
   static const int TYPE_BOOLEAN_TRUE = 0x01;
@@ -82,7 +83,9 @@ static final List<int> _typeMap = List<int>.unmodifiable(
   final Uint8List tempList = Uint8List(10);
   final ByteData tempBD = ByteData(10);
 
-  TCompactProtocol(TTransport transport) : super(transport);
+  TCompactProtocol(TTransport transport,
+      {int maxStringSize = defaultMaxStringSize})
+      : super(transport, maxStringSize: maxStringSize);
 
   /// Write
   @override
@@ -407,6 +410,7 @@ static final List<int> _typeMap = List<int>.unmodifiable(
   String readString() {
     int length = _readVarInt32().toInt();
     _checkNegReadLength(length);
+    _checkStringSize(length);
 
     // TODO look at using temp for small strings?
     Uint8List buff = Uint8List(length);
@@ -418,6 +422,7 @@ static final List<int> _typeMap = List<int>.unmodifiable(
   Uint8List readBinary() {
     int length = _readVarInt32().toInt();
     _checkNegReadLength(length);
+    _checkStringSize(length);
 
     Uint8List buff = Uint8List(length);
     transport.readAll(buff, 0, length);
@@ -427,25 +432,25 @@ static final List<int> _typeMap = List<int>.unmodifiable(
   Int32 _readVarInt32() {
     Int32 result = Int32.ZERO;
     int shift = 0;
-    while (true) {
+    for (int idx = 0; idx < MAX_VARINT_BYTES; idx++) {
       Int32 b = Int32(readByte());
       result |= (b & 0x7f) << shift;
-      if ((b & 0x80) != 0x80) break;
+      if ((b & 0x80) != 0x80) return result;
       shift += 7;
     }
-    return result;
+    throw TProtocolError(TProtocolErrorType.INVALID_DATA, 'Variable-length int over 10 bytes.');
   }
 
   Int64 _readVarInt64() {
     Int64 result = Int64.ZERO;
     int shift = 0;
-    while (true) {
+    for (int idx = 0; idx < MAX_VARINT_BYTES; idx++) {
       Int64 b = Int64(readByte());
       result |= (b & 0x7f) << shift;
-      if ((b & 0x80) != 0x80) break;
+      if ((b & 0x80) != 0x80) return result;
       shift += 7;
     }
-    return result;
+    throw TProtocolError(TProtocolErrorType.INVALID_DATA, 'Variable-length int over 10 bytes.');
   }
 
   Int32 _zigzagToInt32(Int32 n) {
@@ -460,6 +465,14 @@ static final List<int> _typeMap = List<int>.unmodifiable(
     if (length < 0) {
       throw TProtocolError(
           TProtocolErrorType.NEGATIVE_SIZE, 'Negative length: $length');
+    }
+  }
+
+  /// Refuses a declared length before it is allocated.
+  void _checkStringSize(int length) {
+    if (length > maxStringSize) {
+      throw TProtocolError(TProtocolErrorType.SIZE_LIMIT,
+          'Length ($length) larger than max length ($maxStringSize)');
     }
   }
 

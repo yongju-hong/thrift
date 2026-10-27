@@ -36,7 +36,7 @@ Status
 | Branch | Travis | Appveyor | Coverity Scan | codecov.io | Website |
 | :----- | :----- | :------- | :------------ | :--------- | :------ |
 | [`master`](https://github.com/apache/thrift/tree/master) | [![Build Status](https://api.travis-ci.com/apache/thrift.svg?branch=master)](https://app.travis-ci.com/apache/thrift/branches) | [![Build status](https://ci.appveyor.com/api/projects/status/github/apache/thrift?branch=master&svg=true)](https://ci.appveyor.com/project/ApacheSoftwareFoundation/thrift/history) | [![Coverity Scan Build Status](https://scan.coverity.com/projects/1345/badge.svg)](https://scan.coverity.com/projects/thrift) | | [![Website](https://img.shields.io/badge/official-website-brightgreen.svg)](https://thrift.apache.org/) |
-| [`0.17.0`](https://github.com/apache/thrift/tree/0.17.0) | [![Build Status](https://api.travis-ci.com/apache/thrift.svg?branch=0.17.0)](https://app.travis-ci.com/apache/thrift/branches) | | | | |
+| [`0.23.0`](https://github.com/apache/thrift/tree/0.23.0) | [![Build Status](https://api.travis-ci.com/apache/thrift.svg?branch=0.23.0)](https://app.travis-ci.com/apache/thrift/branches) | | | | |
 
 Releases
 ========
@@ -178,6 +178,37 @@ to Java, Ruby, PHP).
 
 Look for the README.md file in the lib/<language>/ folder for more details on the
 installation of each language library package.
+
+Prebuilt compiler for Windows
+-----------------------------
+
+On Windows, the compiler does not have to be built from source. Alongside the
+source release, it is also published ready-built:
+
+* with [Chocolatey](https://community.chocolatey.org/packages/thrift):
+  `choco install thrift`
+* as a [.NET tool](https://www.nuget.org/packages/Apache.Thrift.Compiler):
+  `dotnet tool install --global Apache.Thrift.Compiler`
+* with the installer `thrift-<version>-setup.exe` from the
+  [GitHub release](https://github.com/apache/thrift/releases/latest)
+* as the plain executable `thrift-<version>.exe` from the
+  [download page](https://thrift.apache.org/download)
+
+Chocolatey installs for all users and needs an elevated shell. The installer
+installs for the current user by default and needs no administrator rights.
+Chocolatey and the .NET tool put `thrift` on the `PATH`, and the installer
+offers to do so.
+
+The compiler needs the Microsoft Visual C++ Redistributable (x64). Chocolatey
+installs it along with the compiler; otherwise, make sure the
+[latest version](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist)
+is installed.
+
+The .NET tool contains the Windows build only. Should `thrift` ask for .NET 8
+although a newer .NET is installed, uninstall the tool and install it again
+with `--allow-roll-forward` added. To pin its version for a repository with a
+tool manifest, see
+[build/windows/dotnet-tool/README.md](build/windows/dotnet-tool/README.md).
 
 Package Managers
 ================

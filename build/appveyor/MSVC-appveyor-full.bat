@@ -145,19 +145,11 @@ IF "%WITH_PYTHON%" == "ON" (
   "!PYTHON_ROOT!\python.exe" -m ensurepip --upgrade || EXIT /B
   "!PYTHON_ROOT!\python.exe" -m pip install --upgrade pip setuptools wheel || EXIT /B
   "!PYTHON_ROOT!\python.exe" -m pip ^
-      install backports.ssl_match_hostname ^
-              ipaddress ^
+      install ipaddress ^
               tornado>=6.3.0 ^
               twisted>=24.3.0 ^
               zope.interface>=6.1 || EXIT /B
 )
-
-:: Adobe Flex SDK 4.6 for ActionScript
-MKDIR "C:\Adobe\Flex\SDK\4.6" || EXIT /B
-appveyor DownloadFile https://fpdownload.adobe.com/pub/flex/sdk/builds/flex4.6/flex_sdk_4.6.0.23201B.zip -FileName C:\Adobe\Flex\SDK\4.6\SDK.zip || EXIT /B
-CD "C:\Adobe\Flex\SDK\4.6" || EXIT /B
-7z x SDK.zip || EXIT /B
-SETX FLEX_HOME "C:\Adobe\Flex\SDK\4.6"
 
 
 ::
@@ -198,7 +190,7 @@ cmake.exe "%SRCDIR%" ^
   -DZLIB_ROOT="%WIN3P%\zlib-inst" ^
   -DWITH_PYTHON=%WITH_PYTHON% %CMAKE_PYTHON_OPTS% || EXIT /B
 
-cmake.exe --build . --config "%CONFIGURATION%" || EXIT /B
+cmake.exe --build . --config "%CONFIGURATION%" --parallel %NUMBER_OF_PROCESSORS% || EXIT /B
 
 cmake.exe --install . --config "%CONFIGURATION%" || EXIT /B
 

@@ -247,6 +247,10 @@ public:
     */
   void checkIdleBufferMemLimit(size_t readLimit, size_t writeLimit);
 
+  /// Grows the read buffer to at least target bytes by doubling; never shrinks.
+  /// Throws std::bad_alloc if the reallocation fails.
+  void growReadBuffer(uint32_t target);
+
   /// Initialize
   void init(TNonblockingIOThread* ioThread);
 
@@ -257,8 +261,14 @@ public:
    * This is called when the application transitions from one state into
    * another. This means that it has finished writing the data that it needed
    * to, or finished receiving the data that it needed to.
+   *
+   * Returns true if the calling I/O thread may keep working this connection's
+   * socket. Returns false when the transition closed the connection -- close()
+   * hands the object back to the server, which may recycle or delete it -- or
+   * handed it to a worker task; in either case the caller must not read any of
+   * its members afterwards.
    */
-  void transition();
+  bool transition();
 
   /**
    * C-callable event handler for connection events.  Provides a callback
@@ -270,7 +280,22 @@ public:
    */
   static void eventHandler(evutil_socket_t fd, short /* which */, void* v) {
     assert(fd == static_cast<evutil_socket_t>(((TConnection*)v)->getTSocket()->getSocketFD()));
-    ((TConnection*)v)->workSocket();
+    auto* connection = (TConnection*)v;
+    // libevent is C: an exception unwinding out of this callback does not reach
+    // any handler, it reaches std::terminate. workSocket() and the transition()
+    // it drives can throw -- growing the read buffer for a frame the peer sized
+    // throws std::bad_alloc when the allocation fails -- so the boundary is
+    // where that has to stop. One connection cannot be served; the rest can.
+    try {
+      connection->workSocket();
+    } catch (const std::exception& x) {
+      TOutput::instance().printf("TNonblockingServer: %s while working the socket, closing connection.",
+                                 x.what());
+      connection->close();
+    } catch (...) {
+      TOutput::instance()("TNonblockingServer: unknown exception while working the socket, closing connection.");
+      connection->close();
+    }
   }
 
   /**
@@ -343,10 +368,12 @@ public:
       }
     } catch (const TTransportException& ttx) {
       TOutput::instance().printf("TNonblockingServer: client died: %s", ttx.what());
-    } catch (const std::bad_alloc&) {
-      TOutput::instance()("TNonblockingServer: caught bad_alloc exception.");
-      exit(1);
     } catch (const std::exception& x) {
+      // std::bad_alloc lands here too, and is no longer treated apart. It used
+      // to be answered with exit(1), which turned one request that could not be
+      // allocated -- a declared container count is enough to try one -- into
+      // the end of the process for every other client connected to it. The
+      // inline path in this same file has always just closed the connection.
       TOutput::instance().printf("TNonblockingServer: process() exception: %s: %s",
                           typeid(x).name(),
                           x.what());
@@ -478,6 +505,19 @@ void TNonblockingServer::TConnection::workSocket() {
         close();
         return;
       }
+      // Refuse a frame the message-size budget cannot admit before the read
+      // buffer is grown for it. The accepted socket carries the server's
+      // configuration, so this bounds the allocation by the configured maximum
+      // message size, which may be tighter than the frame-size ceiling above.
+      // The check is stable across the life of the connection: the C++ socket
+      // budget gates each read and does not accumulate.
+      try {
+        tSocket_->checkReadBytesAvailable(readWant_);
+      } catch (const TTransportException& te) {
+        TOutput::instance().printf("TConnection::workSocket(): %s", te.what());
+        close();
+        return;
+      }
       // size known; now get the rest of the frame
       transition();
 
@@ -503,8 +543,19 @@ void TNonblockingServer::TConnection::workSocket() {
       }
 
       try {
-        // Read from the socket
-        fetch = readWant_ - readBufferPos_;
+        // Grow the read buffer toward the frame size only as far as the next
+        // read needs, so the reservation tracks the payload actually received
+        // rather than the size the peer declared. Request double the current
+        // size, capped at the frame size, which also keeps the multiply from
+        // overflowing. growReadBuffer() rounds up by doubling, so the buffer can
+        // still end up larger than the frame.
+        if (readBufferPos_ == readBufferSize_) {
+          growReadBuffer(readBufferSize_ > readWant_ / 2 ? readWant_ : readBufferSize_ * 2);
+        }
+        // Read from the socket, but never past the end of this frame: the buffer
+        // may be larger than the frame (see above, or kept from an earlier
+        // request), and bytes beyond readWant_ belong to the next frame.
+        fetch = (std::min)(readBufferSize_, readWant_) - readBufferPos_;
         got = tSocket_->read(readBuffer_ + readBufferPos_, fetch);
       } catch (TTransportException& te) {
         //In Nonblocking SSLSocket some operations need to be retried again.
@@ -526,7 +577,13 @@ void TNonblockingServer::TConnection::workSocket() {
 
         // We are done reading, move onto the next state
         if (readBufferPos_ == readWant_) {
-          transition();
+          // Processing the request inline can close this connection, which hands
+          // the object back to the server to be recycled or deleted. Once that
+          // has happened none of its members may be read, so stop working the
+          // socket the moment transition() reports the connection is gone.
+          if (!transition()) {
+            return;
+          }
           if (socketState_ == SOCKET_RECV_FRAMING && tSocket_->hasPendingDataToRead())
           {
               continue;
@@ -591,8 +648,14 @@ bool TNonblockingServer::getHeaderTransport() {
  * This is called when the application transitions from one state into
  * another. This means that it has finished writing the data that it needed
  * to, or finished receiving the data that it needed to.
+ *
+ * Returns true if the calling I/O thread may keep working this connection's
+ * socket. Returns false when the transition closed the connection -- close()
+ * hands the object back to the server, which may recycle or delete it -- or
+ * handed it to a worker task; in either case the caller must not read any of
+ * its members afterwards.
  */
-void TNonblockingServer::TConnection::transition() {
+bool TNonblockingServer::TConnection::transition() {
   // ensure this connection is active right now
   assert(ioThread_);
   assert(server_);
@@ -605,11 +668,15 @@ void TNonblockingServer::TConnection::transition() {
     // and get back some data from the dispatch function
     if (server_->getHeaderTransport()) {
       inputTransport_->resetBuffer(readBuffer_, readBufferPos_);
+      inputTransport_->bindMessageSizeToBuffer();
       outputTransport_->resetBuffer();
     } else {
       // We saved room for the framing size in case header transport needed it,
       // but just skip it for the non-header case
       inputTransport_->resetBuffer(readBuffer_ + 4, readBufferPos_ - 4);
+      // The frame is already off; what is left is exactly one message, and the
+      // protocol should not be allowed to size anything beyond it.
+      inputTransport_->bindMessageSizeToBuffer();
       outputTransport_->resetBuffer();
 
       // Prepend four bytes of blank space to the buffer so we can
@@ -641,47 +708,64 @@ void TNonblockingServer::TConnection::transition() {
         TOutput::instance().printf("IllegalStateException: Server::process() %s", ise.what());
         server_->decrementActiveProcessors();
         close();
+        return false;
       } catch (TimedOutException& to) {
         TOutput::instance().printf("[ERROR] TimedOutException: Server::process() %s", to.what());
         server_->decrementActiveProcessors();
         close();
-      } catch (TooManyPendingTasksException &so) {
-
-        std::string fname("TooManyPendingTasksException");
-        int32_t seqid=0;
-
+        return false;
+      } catch (const TooManyPendingTasksException&) {
+        // Preserve the request identity so the client can handle queue overload
+        // as an application exception and reuse the connection.
         try {
-            protocol::TProtocol* inRaw = inputProtocol_.get();
-
-            protocol::TMessageType mtype;
-            inRaw->readMessageBegin(fname, mtype, seqid);
-        } catch(const std::exception& e) {
-          TOutput::instance().printf("[ERROR] server_->addTask() TooManyPendingTasksException raised an exception: %s", e.what());
+          std::string fname;
+          int32_t seqid = 0;
+          protocol::TMessageType mtype;
+          inputProtocol_->readMessageBegin(fname, mtype, seqid);
+          // Oneway clients never read a reply; leave the output empty so the
+          // connection can receive its next request without a stale exception.
+          if (mtype != protocol::T_ONEWAY) {
+            TApplicationException x("TooManyPendingTasksException");
+            outputProtocol_->writeMessageBegin(fname, protocol::T_EXCEPTION, seqid);
+            x.write(outputProtocol_.get());
+            outputProtocol_->writeMessageEnd();
+            outputProtocol_->getTransport()->writeEnd();
+            outputProtocol_->getTransport()->flush();
+          }
+        } catch (const std::exception& e) {
+          TOutput::instance().printf(
+              "[ERROR] TooManyPendingTasksException response failed: %s", e.what());
+          server_->decrementActiveProcessors();
+          close();
+          return false;
+        } catch (...) {
+          TOutput::instance().printf(
+              "[ERROR] TooManyPendingTasksException response raised an unknown exception");
+          server_->decrementActiveProcessors();
+          close();
+          return false;
         }
-        ::apache::thrift::TApplicationException x("TooManyPendingTasksException");
-        outputProtocol_->writeMessageBegin(fname, ::apache::thrift::protocol::T_EXCEPTION, seqid);
-        x.write(outputProtocol_.get());
-        outputProtocol_->writeMessageEnd();
-        outputProtocol_->getTransport()->writeEnd();
-        outputProtocol_->getTransport()->flush();
-        //TOutput::instance().printf("[ERROR] TooManyPendingTasksException: Server::process() %s", so.what());
         if (!notifyIOThread()) {
           TOutput::instance().printf("[ERROR] server_->addTask(): failed to notifyIOThread, closing.");
           server_->decrementActiveProcessors();
           close();
         }
-        return;
-      } catch(const std::exception& e) {
+        return false;
+      } catch (const std::exception& e) {
         TOutput::instance().printf("[ERROR] server_->addTask() raised an exception: %s", e.what());
         server_->decrementActiveProcessors();
         close();
-      } catch(...) {
+        return false;
+      } catch (...) {
         TOutput::instance().printf("[ERROR] server_->addTask() raised an unknown exception");
         server_->decrementActiveProcessors();
         close();
+        return false;
       }
 
-      return;
+      // The task now owns the connection and a worker thread may close it, so
+      // this I/O thread must not read the connection's members again either.
+      return false;
     } else {
       try {
         if (serverEventHandler_) {
@@ -696,19 +780,19 @@ void TNonblockingServer::TConnection::transition() {
             ttx.what());
         server_->decrementActiveProcessors();
         close();
-        return;
+        return false;
       } catch (const std::exception& x) {
         TOutput::instance().printf("Server::process() uncaught exception: %s: %s",
                             typeid(x).name(),
                             x.what());
         server_->decrementActiveProcessors();
         close();
-        return;
+        return false;
       } catch (...) {
         TOutput::instance().printf("Server::process() unknown exception");
         server_->decrementActiveProcessors();
         close();
-        return;
+        return false;
       }
     }
     // fallthrough
@@ -742,7 +826,7 @@ void TNonblockingServer::TConnection::transition() {
       appState_ = APP_SEND_RESULT;
       setWrite();
 
-      return;
+      return true;
     }
 
     // In this case, the request was oneway and we should fall through
@@ -781,31 +865,24 @@ void TNonblockingServer::TConnection::transition() {
     // Register read event
     setRead();
 
-    return;
+    return true;
 
   case APP_READ_FRAME_SIZE:
     readWant_ += 4;
 
-    // We just read the request length
-    // Double the buffer size until it is big enough
-    if (readWant_ > readBufferSize_) {
-      if (readBufferSize_ == 0) {
-        readBufferSize_ = 1;
-      }
-      uint32_t newSize = readBufferSize_;
-      while (readWant_ > newSize) {
-        newSize *= 2;
-      }
-
-      auto* newBuffer = (uint8_t*)std::realloc(readBuffer_, newSize);
-      if (newBuffer == nullptr) {
-        // nothing else to be done...
-        TOutput::instance().printf("server::transition() ERROR: failed to realloc size(%s)", newSize);
-        throw std::bad_alloc();
-      }
-      readBuffer_ = newBuffer;
-      readBufferSize_ = newSize;
-    }
+    // We just read the request length. Reserve only enough to hold the 4-byte
+    // length prefix and begin reading; the buffer grows toward readWant_ in
+    // SOCKET_RECV as the payload arrives, so a peer that declares a large frame
+    // and sends no payload does not make the server reserve the whole frame.
+    //
+    // The initial kilobyte deliberately equals IDLE_READ_BUFFER_LIMIT: a
+    // connection that only ever carries small frames settles at exactly the
+    // size an idle connection is permitted to keep, so checkIdleBufferMemLimit()
+    // never frees and regrows it between requests. Keep this a small fixed
+    // constant -- do not derive it from a configurable idle limit, or raising
+    // that limit would push every connection back to reserving large buffers on
+    // the header, which is the amplification this change exists to remove.
+    growReadBuffer((std::min)(readWant_, static_cast<uint32_t>(1024)));
 
     readBufferPos_ = 4;
     *((uint32_t*)readBuffer_) = htonl(readWant_ - 4);
@@ -814,17 +891,21 @@ void TNonblockingServer::TConnection::transition() {
     socketState_ = SOCKET_RECV;
     appState_ = APP_READ_REQUEST;
 
-    return;
+    return true;
 
   case APP_CLOSE_CONNECTION:
     server_->decrementActiveProcessors();
     close();
-    return;
+    return false;
 
   default:
     TOutput::instance().printf("Unexpected Application State %d", appState_);
     assert(0);
   }
+
+  // Only an unexpected application state falls out of the switch without an
+  // explicit return; the connection is still alive in that case.
+  return true;
 }
 
 void TNonblockingServer::TConnection::setFlags(short eventFlags) {
@@ -922,6 +1003,32 @@ void TNonblockingServer::TConnection::checkIdleBufferMemLimit(size_t readLimit, 
   }
 }
 
+void TNonblockingServer::TConnection::growReadBuffer(uint32_t target) {
+  if (target <= readBufferSize_) {
+    return;
+  }
+  uint32_t newSize = readBufferSize_ ? readBufferSize_ : 1;
+  while (newSize < target) {
+    uint32_t doubled = newSize * 2;
+    if (doubled <= newSize) {
+      // The next doubling would overflow uint32_t. target is itself a valid
+      // uint32_t (bounded by the frame size), so stop doubling and allocate
+      // exactly what is needed rather than wrapping to a smaller size.
+      newSize = target;
+      break;
+    }
+    newSize = doubled;
+  }
+  auto* newBuffer = (uint8_t*)std::realloc(readBuffer_, newSize);
+  if (newBuffer == nullptr) {
+    // nothing else to be done...
+    TOutput::instance().printf("server::growReadBuffer() ERROR: failed to realloc size(%u)", newSize);
+    throw std::bad_alloc();
+  }
+  readBuffer_ = newBuffer;
+  readBufferSize_ = newSize;
+}
+
 TNonblockingServer::~TNonblockingServer() {
   // Close any active connections (moves them to the idle connection stack)
   while (!activeConnections_.empty()) {
@@ -1002,54 +1109,91 @@ void TNonblockingServer::handleEvent(THRIFT_SOCKET fd, short which) {
   // Going to accept a new client socket
   std::shared_ptr<TSocket> clientSocket;
 
-  clientSocket = serverTransport_->accept();
-  if (clientSocket) {
-    // If we're overloaded, take action here
-    if (overloadAction_ != T_OVERLOAD_NO_ACTION && serverOverloaded()) {
-      Guard g(connMutex_);
-      nConnectionsDropped_++;
-      nTotalConnectionsDropped_++;
-      if (overloadAction_ == T_OVERLOAD_CLOSE_ON_ACCEPT) {
-        clientSocket->close();
-        return;
-      } else if (overloadAction_ == T_OVERLOAD_DRAIN_TASK_QUEUE) {
-        if (!drainPendingTask()) {
-          // Nothing left to discard, so we drop connection instead.
+  // libevent is C: an exception unwinding out of this callback does not reach a
+  // handler, it reaches std::terminate and the only listener loop ends. A failed
+  // ::accept() arrives here as a TTransportException -- that is one connection
+  // not taken, not a reason to stop serving the rest -- so it is logged and
+  // skipped, the same boundary eventHandler() and notifyHandler() already put
+  // around their own work.
+  try {
+    clientSocket = serverTransport_->accept();
+  } catch (const std::exception& x) {
+    TOutput::instance().printf("TNonblockingServer: %s while accepting a connection, continuing to listen.",
+                               x.what());
+    return;
+  } catch (...) {
+    TOutput::instance()("TNonblockingServer: unknown exception while accepting a connection, continuing to listen.");
+    return;
+  }
+
+  // Setting the accepted connection up can throw too (growing a buffer, or the
+  // application's createContext). Keep the pointer outside the try so that one
+  // connection can be closed rather than leaked, and keep the listener running.
+  TConnection* clientConnection = nullptr;
+  try {
+    if (clientSocket) {
+      // If we're overloaded, take action here
+      if (overloadAction_ != T_OVERLOAD_NO_ACTION && serverOverloaded()) {
+        Guard g(connMutex_);
+        nConnectionsDropped_++;
+        nTotalConnectionsDropped_++;
+        if (overloadAction_ == T_OVERLOAD_CLOSE_ON_ACCEPT) {
           clientSocket->close();
           return;
+        } else if (overloadAction_ == T_OVERLOAD_DRAIN_TASK_QUEUE) {
+          if (!drainPendingTask()) {
+            // Nothing left to discard, so we drop connection instead.
+            clientSocket->close();
+            return;
+          }
+        }
+      }
+
+      // Create a new TConnection for this client socket.
+      clientConnection = createConnection(clientSocket);
+
+      // Fail fast if we could not create a TConnection object
+      if (clientConnection == nullptr) {
+        TOutput::instance().printf("thriftServerEventHandler: failed TConnection factory");
+        clientSocket->close();
+        return;
+      }
+
+      /*
+       * Either notify the ioThread that is assigned this connection to
+       * start processing, or if it is us, we'll just ask this
+       * connection to do its initial state change here.
+       *
+       * (We need to avoid writing to our own notification pipe, to
+       * avoid possible deadlocks if the pipe is full.)
+       *
+       * The IO thread #0 is the only one that handles these listen
+       * events, so unless the connection has been assigned to thread #0
+       * we know it's not on our thread.
+       */
+      if (clientConnection->getIOThreadNumber() == 0) {
+        clientConnection->transition();
+      } else {
+        if (!clientConnection->notifyIOThread()) {
+          TOutput::instance().perror("[ERROR] notifyIOThread failed on fresh connection, closing", errno);
+          clientConnection->close();
         }
       }
     }
-
-    // Create a new TConnection for this client socket.
-    TConnection* clientConnection = createConnection(clientSocket);
-
-    // Fail fast if we could not create a TConnection object
-    if (clientConnection == nullptr) {
-      TOutput::instance().printf("thriftServerEventHandler: failed TConnection factory");
+  } catch (const std::exception& x) {
+    TOutput::instance().printf("TNonblockingServer: %s setting up an accepted connection, continuing to listen.",
+                               x.what());
+    if (clientConnection != nullptr) {
+      clientConnection->close();
+    } else if (clientSocket) {
       clientSocket->close();
-      return;
     }
-
-    /*
-     * Either notify the ioThread that is assigned this connection to
-     * start processing, or if it is us, we'll just ask this
-     * connection to do its initial state change here.
-     *
-     * (We need to avoid writing to our own notification pipe, to
-     * avoid possible deadlocks if the pipe is full.)
-     *
-     * The IO thread #0 is the only one that handles these listen
-     * events, so unless the connection has been assigned to thread #0
-     * we know it's not on our thread.
-     */
-    if (clientConnection->getIOThreadNumber() == 0) {
-      clientConnection->transition();
-    } else {
-      if (!clientConnection->notifyIOThread()) {
-        TOutput::instance().perror("[ERROR] notifyIOThread failed on fresh connection, closing", errno);
-        clientConnection->close();
-      }
+  } catch (...) {
+    TOutput::instance()("TNonblockingServer: unknown exception setting up an accepted connection, continuing to listen.");
+    if (clientConnection != nullptr) {
+      clientConnection->close();
+    } else if (clientSocket) {
+      clientSocket->close();
     }
   }
 }
@@ -1058,6 +1202,9 @@ void TNonblockingServer::handleEvent(THRIFT_SOCKET fd, short which) {
  * Creates a socket to listen on and binds it to the local port.
  */
 void TNonblockingServer::createAndListenOnSocket() {
+  // Ensure every socket the server transport accepts is handed the server's
+  // configuration, even when the caller never called setConfiguration().
+  serverTransport_->setConfiguration(config_);
   serverTransport_->listen();
   serverSocket_ = serverTransport_->getSocketFD();
 }
@@ -1432,7 +1579,17 @@ void TNonblockingIOThread::notifyHandler(evutil_socket_t fd, short which, void* 
         ioThread->breakLoop(false);
         return;
       }
-      connection->transition();
+      // Same boundary as eventHandler(): this is a libevent callback too.
+      try {
+        connection->transition();
+      } catch (const std::exception& x) {
+        TOutput::instance().printf("TNonblockingServer: %s in notifyHandler, closing connection.",
+                                   x.what());
+        connection->close();
+      } catch (...) {
+        TOutput::instance()("TNonblockingServer: unknown exception in notifyHandler, closing connection.");
+        connection->close();
+      }
     } else if (nBytes > 0) {
       // throw away these bytes and hope that next time we get a solid read
       TOutput::instance().printf("notifyHandler: Bad read of %d bytes, wanted %d", nBytes, kSize);

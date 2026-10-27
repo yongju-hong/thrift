@@ -274,7 +274,7 @@ string t_lua_generator::render_const_value(t_type* type, t_const_value* value) {
       }
       break;
     case t_base_type::TYPE_UUID:
-      out << "TUUIDfromString(" << value->get_string() << ")";
+      out << "TUUIDfromString('" << get_escaped_string(value) << "')";
       break;
     default:
       throw "compiler error: no const of base type " + t_base_type::t_base_name(tbase);
@@ -421,6 +421,9 @@ void t_lua_generator::generate_lua_struct_reader(ostream& out, t_struct* tstruct
   indent(out) << '\n' << '\n' << "function " << tstruct->get_name() << ":read(iprot)" << '\n';
   indent_up();
 
+  indent(out) << "iprot:incrementRecursionDepth()" << '\n';
+  indent(out) << "local ok, err = pcall(function()" << '\n';
+  indent_up();
   indent(out) << "iprot:readStructBegin()" << '\n';
 
   // while: Read in fields
@@ -460,6 +463,10 @@ void t_lua_generator::generate_lua_struct_reader(ostream& out, t_struct* tstruct
   indent_down();
   indent(out) << "end" << '\n';
   indent(out) << "iprot:readStructEnd()" << '\n';
+  indent_down();
+  indent(out) << "end)" << '\n';
+  indent(out) << "iprot:decrementRecursionDepth()" << '\n';
+  indent(out) << "if not ok then error(err, 0) end" << '\n';
 
   // end function
   indent_down();
@@ -478,6 +485,9 @@ void t_lua_generator::generate_lua_struct_writer(ostream& out, t_struct* tstruct
   indent(out) << '\n' << '\n' << "function " << tstruct->get_name() << ":write(oprot)" << '\n';
   indent_up();
 
+  indent(out) << "oprot:incrementRecursionDepth()" << '\n';
+  indent(out) << "local ok, err = pcall(function()" << '\n';
+  indent_up();
   indent(out) << "oprot:writeStructBegin('" << tstruct->get_name() << "')" << '\n';
   for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
     // To check element of self whether nil or not.
@@ -497,6 +507,10 @@ void t_lua_generator::generate_lua_struct_writer(ostream& out, t_struct* tstruct
   }
   indent(out) << "oprot:writeFieldStop()" << '\n';
   indent(out) << "oprot:writeStructEnd()" << '\n';
+  indent_down();
+  indent(out) << "end)" << '\n';
+  indent(out) << "oprot:decrementRecursionDepth()" << '\n';
+  indent(out) << "if not ok then error(err, 0) end" << '\n';
 
   // end function
   indent_down();
@@ -827,7 +841,7 @@ void t_lua_generator::generate_deserialize_field(ostream& out,
       t_base_type::t_base tbase = ((t_base_type*)type)->get_base();
       switch (tbase) {
       case t_base_type::TYPE_VOID:
-        throw "compiler error: cannot serialize void field in a struct: " + name;
+        throw "compiler error: cannot deserialize void field in a struct: " + name;
         break;
       case t_base_type::TYPE_STRING:
         out << "readString()";
@@ -854,7 +868,7 @@ void t_lua_generator::generate_deserialize_field(ostream& out,
         out << "readUuid()";
         break;
       default:
-        throw "compiler error: no PHP name for base type " + t_base_type::t_base_name(tbase);
+        throw "compiler error: no Lua name for base type " + t_base_type::t_base_name(tbase);
       }
     } else if (type->is_enum()) {
       out << "readI32()";
@@ -1012,7 +1026,7 @@ void t_lua_generator::generate_serialize_field(ostream& out, t_field* tfield, st
         out << "writeUuid(" << name << ")";
         break;
       default:
-        throw "compiler error: no PHP name for base type " + t_base_type::t_base_name(tbase);
+        throw "compiler error: no Lua name for base type " + t_base_type::t_base_name(tbase);
       }
     } else if (type->is_enum()) {
       out << "writeI32(" << name << ")";

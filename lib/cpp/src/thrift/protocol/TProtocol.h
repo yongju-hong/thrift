@@ -208,6 +208,23 @@ namespace protocol {
 using apache::thrift::transport::TTransport;
 
 /**
+ * The largest initial capacity a wire-supplied container element count may reserve. A container
+ * header is read before any of its elements, so a peer can name an element count it never backs
+ * with data.
+ */
+const uint32_t MAX_PREALLOC_SIZE = 1024;
+
+/**
+ * Returns the initial capacity to reserve for a container whose declared element count is \a size.
+ * Capping what the count reserves up front keeps that cost proportional to the bytes actually sent,
+ * while still reserving exact capacity for containers that fit under the cap; larger containers grow
+ * as elements are added. Used by generated code.
+ */
+inline uint32_t preallocSize(uint32_t size) {
+  return size < MAX_PREALLOC_SIZE ? size : MAX_PREALLOC_SIZE;
+}
+
+/**
  * Abstract class for a thrift protocol driver. These are all the methods that
  * a protocol must implement. Essentially, there must be some way of reading
  * and writing all the base types, plus a mechanism for writing out structs
@@ -604,18 +621,18 @@ protected:
 
   virtual void checkReadBytesAvailable(TSet& set)
   {
-      ptrans_->checkReadBytesAvailable(set.size_ * getMinSerializedSize(set.elemType_));
+      ptrans_->checkReadBytesAvailable(static_cast<int64_t>(set.size_) * getMinSerializedSize(set.elemType_));
   }
 
   virtual void checkReadBytesAvailable(TList& list)
   {
-      ptrans_->checkReadBytesAvailable(list.size_ * getMinSerializedSize(list.elemType_));
+      ptrans_->checkReadBytesAvailable(static_cast<int64_t>(list.size_) * getMinSerializedSize(list.elemType_));
   }
 
   virtual void checkReadBytesAvailable(TMap& map)
   {
       int elmSize = getMinSerializedSize(map.keyType_) + getMinSerializedSize(map.valueType_);
-      ptrans_->checkReadBytesAvailable(map.size_ * elmSize);
+      ptrans_->checkReadBytesAvailable(static_cast<int64_t>(map.size_) * elmSize);
   }
 
   std::shared_ptr<TTransport> ptrans_;
@@ -783,6 +800,10 @@ uint32_t skip(Protocol_& prot, TType type) {
     }
     result += prot.readListEnd();
     return result;
+  }
+  case T_UUID: {
+    TUuid uuid;
+    return prot.readUUID(uuid);
   }
   default:
     break;
